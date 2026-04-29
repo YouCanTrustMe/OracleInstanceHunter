@@ -2,28 +2,6 @@ import oci
 import config
 
 
-def _get_compute_client() -> oci.core.ComputeClient:
-    cfg = oci.config.from_file.__func__ if False else {
-        "user": config.OCI_USER,
-        "fingerprint": config.OCI_FINGERPRINT,
-        "tenancy": config.OCI_TENANCY,
-        "region": config.OCI_REGION,
-        "key_file": config.OCI_KEY_FILE,
-    }
-    return oci.core.ComputeClient(cfg)
-
-
-def _get_network_client() -> oci.core.VirtualNetworkClient:
-    cfg = {
-        "user": config.OCI_USER,
-        "fingerprint": config.OCI_FINGERPRINT,
-        "tenancy": config.OCI_TENANCY,
-        "region": config.OCI_REGION,
-        "key_file": config.OCI_KEY_FILE,
-    }
-    return oci.core.VirtualNetworkClient(cfg)
-
-
 def _read_ssh_public_key() -> str:
     with open(config.SSH_PUBLIC_KEY_PATH, "r") as f:
         return f.read().strip()
