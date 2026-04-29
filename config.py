@@ -11,7 +11,7 @@ OCI_KEY_FILE = os.environ["OCI_KEY_FILE"]
 
 COMPARTMENT_ID = os.environ["COMPARTMENT_ID"]
 SUBNET_ID = os.environ["SUBNET_ID"]
-IMAGE_ID = os.environ["IMAGE_ID"]
+IMAGE_ID = os.environ.get("IMAGE_ID", "")
 AVAILABILITY_DOMAIN = os.environ["AVAILABILITY_DOMAIN"]
 
 INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "arm-instance")

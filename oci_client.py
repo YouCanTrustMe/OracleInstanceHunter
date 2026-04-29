@@ -17,12 +17,27 @@ def _build_oci_config() -> dict:
     }
 
 
+def _find_ubuntu_arm_image(compute: oci.core.ComputeClient) -> str:
+    images = compute.list_images(
+        compartment_id=config.COMPARTMENT_ID,
+        operating_system="Canonical Ubuntu",
+        operating_system_version="22.04",
+        shape=config.SHAPE,
+        sort_by="TIMECREATED",
+        sort_order="DESC",
+    ).data
+    if not images:
+        raise RuntimeError("No Ubuntu 22.04 image found for shape " + config.SHAPE)
+    return images[0].id
+
+
 def launch_instance() -> dict | None:
     oci_config = _build_oci_config()
     compute = oci.core.ComputeClient(oci_config)
     network = oci.core.VirtualNetworkClient(oci_config)
 
     ssh_key = _read_ssh_public_key()
+    image_id = config.IMAGE_ID if config.IMAGE_ID else _find_ubuntu_arm_image(compute)
 
     details = oci.core.models.LaunchInstanceDetails(
         availability_domain=config.AVAILABILITY_DOMAIN,
@@ -34,7 +49,7 @@ def launch_instance() -> dict | None:
             memory_in_gbs=config.MEMORY_GB,
         ),
         source_details=oci.core.models.InstanceSourceViaImageDetails(
-            image_id=config.IMAGE_ID,
+            image_id=image_id,
             source_type="image",
         ),
         create_vnic_details=oci.core.models.CreateVnicDetails(
