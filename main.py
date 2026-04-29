@@ -1,5 +1,7 @@
 import time
 import logging
+import threading
+import requests
 import oci.exceptions
 
 import config
@@ -24,10 +26,48 @@ def is_out_of_capacity(error: oci.exceptions.ServiceError) -> bool:
     return OUT_OF_CAPACITY_MSG in str(error.message)
 
 
+HEARTBEAT_INTERVAL = 1800  # send heartbeat every 30 minutes
+LOG_LINES = 20
+
+
+def _bot_listener() -> None:
+    url_base = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
+    offset = 0
+    while True:
+        try:
+            resp = requests.get(f"{url_base}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35)
+            updates = resp.json().get("result", [])
+            for update in updates:
+                offset = update["update_id"] + 1
+                msg = update.get("message", {})
+                text = msg.get("text", "")
+                if text.startswith("/logs"):
+                    try:
+                        with open("hunter.log", "r") as f:
+                            lines = f.readlines()
+                        tail = "".join(lines[-LOG_LINES:]) or "Log is empty."
+                        notifier.send_message(f"<pre>{tail}</pre>", silent=True)
+                    except Exception as e:
+                        notifier.send_message(f"Could not read log: {e}", silent=True)
+        except Exception:
+            time.sleep(5)
+
+
 def run() -> None:
     logger.info("Starting OracleInstanceHunter. Polling every %d seconds.", config.POLL_INTERVAL)
+    threading.Thread(target=_bot_listener, daemon=True).start()
+    notifier.notify_started(config.POLL_INTERVAL)
+
+    attempt = 0
+    last_heartbeat = time.time()
 
     while True:
+        attempt += 1
+        now = time.time()
+        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+            notifier.notify_heartbeat(attempt)
+            last_heartbeat = now
+
         try:
             result = oci_client.launch_instance()
             logger.info("Instance created: %s | IP: %s", result["name"], result["public_ip"])
