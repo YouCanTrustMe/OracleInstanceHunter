@@ -27,7 +27,32 @@ def is_out_of_capacity(error: oci.exceptions.ServiceError) -> bool:
 
 
 HEARTBEAT_INTERVAL = 1800  # send heartbeat every 30 minutes
-LOG_LINES = 20
+LOG_LINES = 10
+
+
+def _send_log_tail() -> None:
+    try:
+        with open("hunter.log", "r") as f:
+            lines = f.readlines()
+        tail = "".join(lines[-LOG_LINES:]) or "Log is empty."
+        notifier.send_message(f"<pre>{tail}</pre>", silent=True)
+    except Exception as e:
+        notifier.send_message(f"Could not read log: {e}", silent=True)
+
+
+def _send_log_file() -> None:
+    import datetime
+    try:
+        today = datetime.date.today().isoformat()
+        with open("hunter.log", "r") as f:
+            lines = f.readlines()
+        today_lines = [l for l in lines if l.startswith(today)]
+        content = "".join(today_lines) or "No entries for today."
+        url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendDocument"
+        requests.post(url, data={"chat_id": config.TELEGRAM_CHAT_ID, "disable_notification": True},
+                      files={"document": (f"hunter_{today}.log", content.encode())}, timeout=15)
+    except Exception as e:
+        notifier.send_message(f"Could not send log file: {e}", silent=True)
 
 
 def _bot_listener() -> None:
@@ -42,13 +67,9 @@ def _bot_listener() -> None:
                 msg = update.get("message", {})
                 text = msg.get("text", "")
                 if text.startswith("/logs"):
-                    try:
-                        with open("hunter.log", "r") as f:
-                            lines = f.readlines()
-                        tail = "".join(lines[-LOG_LINES:]) or "Log is empty."
-                        notifier.send_message(f"<pre>{tail}</pre>", silent=True)
-                    except Exception as e:
-                        notifier.send_message(f"Could not read log: {e}", silent=True)
+                    _send_log_tail()
+                elif text.startswith("/logfile"):
+                    _send_log_file()
         except Exception:
             time.sleep(5)
 

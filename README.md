@@ -1,107 +1,98 @@
 # OracleInstanceHunter
 
-Polls OCI API every 30 seconds and automatically creates a `VM.Standard.A1.Flex` ARM instance as soon as capacity becomes available. Sends a Telegram notification with the instance details on success.
+Polls the OCI API and automatically creates a **VM.Standard.A1.Flex** ARM instance (4 OCPUs, 24 GB RAM, Ubuntu 22.04) the moment capacity becomes available. Sends a Telegram notification on success.
 
-## Requirements
+## How it works
 
-- Python 3.10+
-- An existing OCI AMD E2.1.Micro instance (Ubuntu 22.04) to run the script on
-- OCI API key configured
-- Telegram bot token and chat ID
+- Tries to launch the ARM instance every `POLL_INTERVAL` seconds (120 recommended)
+- Silently retries on "Out of host capacity"
+- Sends a **silent** Telegram message on startup and every 30 min (heartbeat)
+- Sends a **loud** Telegram notification with instance name and public IP on success
+- Responds to bot commands: `/logs` (last 10 lines), `/logfile` (today's log as file)
 
 ## Setup
 
-### 1. Generate SSH key pair (for the new ARM instance)
+### 1. OCI Console preparation
+
+- **VCN**: create with Internet Gateway + route rule `0.0.0.0/0 → IGW`
+- **IAM Policy** (Identity & Security → Policies → root compartment):
+  ```
+  Allow any-user to manage instance-family in tenancy
+  Allow any-user to manage virtual-network-family in tenancy
+  ```
+- **API Key**: generate RSA key pair, add public key to your OCI user (Identity → Users → API Keys)
+
+### 2. Generate SSH key for the ARM instance (on the server)
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/oracle_arm_key -N ""
 ```
 
-This creates:
-- `~/.ssh/oracle_arm_key` — private key (use this to SSH into the ARM instance later)
-- `~/.ssh/oracle_arm_key.pub` — public key (passed to OCI API on instance creation)
-
-### 2. Configure OCI API access
-
-Place your OCI API private key at `~/.oci/oci_api_key.pem` and ensure permissions are correct:
+### 3. Install
 
 ```bash
+git clone https://github.com/YouCanTrustMe/OracleInstanceHunter
+cd OracleInstanceHunter
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
+cp .env.example .env
+# fill in .env, copy OCI API .pem to OCI_KEY_FILE path
 chmod 600 ~/.oci/oci_api_key.pem
 ```
 
-### 3. Install dependencies
+### 4. Configure `.env`
 
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Configure environment
-
-```bash
-cp .env.example .env
-nano .env
-```
-
-Fill in all values. To find your `IMAGE_ID` for Ubuntu 22.04 in your region, go to OCI Console → Compute → Images → Platform Images.
+| Variable | Description |
+|---|---|
+| `OCI_USER` | Your OCI user OCID |
+| `OCI_FINGERPRINT` | API key fingerprint |
+| `OCI_TENANCY` | Tenancy OCID |
+| `OCI_REGION` | e.g. `eu-zurich-1` |
+| `OCI_KEY_FILE` | Path to OCI API private key `.pem` |
+| `COMPARTMENT_ID` | Use tenancy OCID for root compartment |
+| `SUBNET_ID` | Subnet OCID from your VCN |
+| `AVAILABILITY_DOMAIN` | e.g. `saWo:EU-ZURICH-1-AD-1` |
+| `IMAGE_ID` | Leave empty — auto-detects latest Ubuntu 22.04 aarch64 |
+| `SSH_PUBLIC_KEY_PATH` | Path to `.pub` key for the ARM instance |
+| `TELEGRAM_BOT_TOKEN` | From [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_CHAT_ID` | Your chat ID (get via Telegram `getUpdates`) |
+| `POLL_INTERVAL` | Seconds between attempts (120 recommended) |
 
 ### 5. Run
 
 ```bash
-python main.py
+# foreground
+venv/bin/python main.py
+
+# background (survives SSH disconnect)
+nohup venv/bin/python main.py > hunter.log 2>&1 &
+
+# check it's running
+pgrep -f main.py
+
+# live log
+tail -f hunter.log
 ```
 
-Logs are written to `hunter.log` and also printed to stdout.
-
----
-
-## Run as a systemd service
-
-Create the service file:
+### 6. Run as systemd service (auto-start on reboot)
 
 ```bash
-sudo nano /etc/systemd/system/oracle-hunter.service
-```
-
-```ini
-[Unit]
-Description=OracleInstanceHunter
-After=network.target
-
-[Service]
-User=ubuntu
-WorkingDirectory=/home/ubuntu/OracleInstanceHunter
-ExecStart=/usr/bin/python3 /home/ubuntu/OracleInstanceHunter/main.py
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-
-```bash
+sudo cp oracle-hunter.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable oracle-hunter
 sudo systemctl start oracle-hunter
 sudo systemctl status oracle-hunter
+sudo journalctl -u oracle-hunter -f
 ```
-
-View live logs:
-
-```bash
-journalctl -u oracle-hunter -f
-```
-
----
 
 ## Project structure
 
 ```
-├── main.py          # Entry point, polling loop
-├── config.py        # Loads all configuration from .env
-├── oci_client.py    # OCI API: launch instance, get public IP
-├── notifier.py      # Telegram notification on success
-├── .env.example     # Configuration template
+├── main.py                 # Polling loop + Telegram bot command listener
+├── config.py               # Loads all config from .env
+├── oci_client.py           # OCI API: launch instance, detect image, get public IP
+├── notifier.py             # Telegram notifications (silent/loud)
+├── oracle-hunter.service   # systemd unit file
+├── .env.example            # Config template
 └── requirements.txt
 ```
