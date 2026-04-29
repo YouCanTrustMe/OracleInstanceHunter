@@ -2,6 +2,7 @@ import time
 import random
 import logging
 import threading
+import signal
 import requests
 import oci.exceptions
 
@@ -25,6 +26,18 @@ logger = logging.getLogger(__name__)
 
 OUT_OF_CAPACITY_CODE = "InternalError"
 OUT_OF_CAPACITY_MSG = "Out of host capacity"
+
+_stop_event = threading.Event()
+_state: dict = {"attempt": 0, "start_time": 0.0}
+
+
+def _handle_signal(signum, frame) -> None:
+    logger.info("Signal received (%s), shutting down...", signum)
+    _stop_event.set()
+
+
+signal.signal(signal.SIGTERM, _handle_signal)
+signal.signal(signal.SIGINT, _handle_signal)
 
 
 def is_out_of_capacity(error: oci.exceptions.ServiceError) -> bool:
@@ -60,10 +73,17 @@ def _send_log_file() -> None:
         notifier.send_message(f"Could not send log file: {e}", silent=True)
 
 
+def _format_status() -> str:
+    attempt = _state["attempt"]
+    elapsed = int(time.time() - _state["start_time"])
+    h, m = divmod(elapsed // 60, 60)
+    return f"Attempt #{attempt}, running for {h}h {m:02d}m"
+
+
 def _bot_listener() -> None:
     url_base = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
     offset = 0
-    while True:
+    while not _stop_event.is_set():
         try:
             resp = requests.get(f"{url_base}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35)
             updates = resp.json().get("result", [])
@@ -75,7 +95,10 @@ def _bot_listener() -> None:
                     _send_log_tail()
                 elif text.startswith("/logfile"):
                     _send_log_file()
-        except Exception:
+                elif text.startswith("/status"):
+                    notifier.send_message(_format_status(), silent=True)
+        except Exception as e:
+            logger.warning("Bot listener error: %s", e)
             time.sleep(5)
 
 
@@ -91,14 +114,15 @@ def run() -> None:
         logger.info("=== OracleInstanceHunter finished. Nothing to do ===")
         return
 
-    attempt = 0
+    _state["attempt"] = 0
+    _state["start_time"] = time.time()
     last_heartbeat = time.time()
 
-    while True:
-        attempt += 1
+    while not _stop_event.is_set():
+        _state["attempt"] += 1
         now = time.time()
         if now - last_heartbeat >= HEARTBEAT_INTERVAL:
-            notifier.notify_heartbeat(attempt)
+            notifier.notify_heartbeat(_state["attempt"])
             last_heartbeat = now
 
         try:
@@ -112,7 +136,7 @@ def run() -> None:
             if is_out_of_capacity(e):
                 delay = random.randint(121, 147)
                 logger.info("Out of capacity. Retrying in %d seconds...", delay)
-                time.sleep(delay)
+                _stop_event.wait(delay)
                 continue
             else:
                 logger.error("OCI service error: %s", e)
@@ -121,7 +145,10 @@ def run() -> None:
             logger.error("Unexpected error: %s", e)
 
         delay = random.randint(121, 147)
-        time.sleep(delay)
+        _stop_event.wait(delay)
+
+    if _stop_event.is_set():
+        logger.info("=== OracleInstanceHunter stopped by signal ===")
 
 
 if __name__ == "__main__":
