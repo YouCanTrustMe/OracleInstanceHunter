@@ -1,4 +1,5 @@
 import time
+import random
 import logging
 import threading
 import requests
@@ -8,14 +9,18 @@ import config
 import oci_client
 import notifier
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler("hunter.log"),
-        logging.StreamHandler(),
-    ],
-)
+_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M")
+_fmt.converter = lambda ts: time.gmtime(ts + 7200)  # UTC+2
+
+_fh = logging.FileHandler("hunter.log")
+_fh.setFormatter(_fmt)
+_sh = logging.StreamHandler()
+_sh.setFormatter(_fmt)
+
+logging.getLogger().setLevel(logging.INFO)
+logging.getLogger().addHandler(_fh)
+logging.getLogger().addHandler(_sh)
+
 logger = logging.getLogger(__name__)
 
 OUT_OF_CAPACITY_CODE = "InternalError"
@@ -75,9 +80,16 @@ def _bot_listener() -> None:
 
 
 def run() -> None:
-    logger.info("Starting OracleInstanceHunter. Polling every %d seconds.", config.POLL_INTERVAL)
+    logger.info("=== OracleInstanceHunter started. Random delay: 121-147s between attempts ===")
     threading.Thread(target=_bot_listener, daemon=True).start()
-    notifier.notify_started(config.POLL_INTERVAL)
+    notifier.notify_started()
+
+    existing = oci_client.find_existing_instance()
+    if existing:
+        logger.info("Instance already exists: %s | IP: %s | State: %s", existing["name"], existing["public_ip"], existing["state"])
+        notifier.notify_already_exists(existing["name"], existing["public_ip"], existing["region"], existing["state"])
+        logger.info("=== OracleInstanceHunter finished. Nothing to do ===")
+        return
 
     attempt = 0
     last_heartbeat = time.time()
@@ -93,18 +105,23 @@ def run() -> None:
             result = oci_client.launch_instance()
             logger.info("Instance created: %s | IP: %s", result["name"], result["public_ip"])
             notifier.notify_success(result["name"], result["public_ip"], result["region"])
+            logger.info("=== OracleInstanceHunter finished. Instance is ready ===")
             break
 
         except oci.exceptions.ServiceError as e:
             if is_out_of_capacity(e):
-                logger.info("Out of capacity. Retrying in %d seconds...", config.POLL_INTERVAL)
+                delay = random.randint(121, 147)
+                logger.info("Out of capacity. Retrying in %d seconds...", delay)
+                time.sleep(delay)
+                continue
             else:
                 logger.error("OCI service error: %s", e)
 
         except Exception as e:
             logger.error("Unexpected error: %s", e)
 
-        time.sleep(config.POLL_INTERVAL)
+        delay = random.randint(121, 147)
+        time.sleep(delay)
 
 
 if __name__ == "__main__":

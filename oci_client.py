@@ -31,6 +31,35 @@ def _find_ubuntu_arm_image(compute: oci.core.ComputeClient) -> str:
     return images[0].id
 
 
+def find_existing_instance() -> dict | None:
+    oci_config = _build_oci_config()
+    compute = oci.core.ComputeClient(oci_config)
+    network = oci.core.VirtualNetworkClient(oci_config)
+
+    instances = compute.list_instances(
+        compartment_id=config.COMPARTMENT_ID,
+        display_name=config.INSTANCE_NAME,
+    ).data
+
+    for inst in instances:
+        if inst.lifecycle_state in ("RUNNING", "PROVISIONING", "STARTING"):
+            vnic_attachments = compute.list_vnic_attachments(
+                compartment_id=config.COMPARTMENT_ID,
+                instance_id=inst.id,
+            ).data
+            public_ip = None
+            if vnic_attachments:
+                vnic = network.get_vnic(vnic_attachments[0].vnic_id).data
+                public_ip = vnic.public_ip
+            return {
+                "name": inst.display_name,
+                "public_ip": public_ip or "unknown",
+                "region": config.OCI_REGION,
+                "state": inst.lifecycle_state,
+            }
+    return None
+
+
 def launch_instance() -> dict | None:
     oci_config = _build_oci_config()
     compute = oci.core.ComputeClient(oci_config)
