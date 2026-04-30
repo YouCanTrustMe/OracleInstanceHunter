@@ -9,6 +9,7 @@ import oci.exceptions
 import config
 import oci_client
 import notifier
+import server_stats
 
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M")
 _fmt.converter = lambda ts: time.gmtime(ts + 7200)  # UTC+2
@@ -44,7 +45,7 @@ def is_out_of_capacity(error: oci.exceptions.ServiceError) -> bool:
     return OUT_OF_CAPACITY_MSG in str(error.message)
 
 
-HEARTBEAT_INTERVAL = 1800  # send heartbeat every 30 minutes
+HEARTBEAT_INTERVAL = 3600  # send heartbeat every 1 hour
 LOG_LINES = 10
 
 
@@ -97,6 +98,8 @@ def _bot_listener() -> None:
                     _send_log_file()
                 elif text.startswith("/status"):
                     notifier.send_message(_format_status(), silent=True)
+                elif text.startswith("/load"):
+                    notifier.send_message(f"<pre>{server_stats.format_report()}</pre>", silent=True)
         except Exception as e:
             logger.warning("Bot listener error: %s", e)
             time.sleep(5)
