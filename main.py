@@ -3,6 +3,7 @@ import random
 import logging
 import threading
 import signal
+import datetime
 import requests
 import oci.exceptions
 
@@ -31,6 +32,22 @@ OUT_OF_CAPACITY_MSG = "Out of host capacity"
 _stop_event = threading.Event()
 _state: dict = {"attempt": 0, "start_time": 0.0}
 
+_TZ = datetime.timezone(datetime.timedelta(hours=2))
+
+
+def _local_now() -> datetime.datetime:
+    return datetime.datetime.now(_TZ)
+
+
+def _count_today_attempts() -> int:
+    today = _local_now().date().isoformat()
+    try:
+        with open("hunter.log", "r") as f:
+            lines = f.readlines()
+        return sum(1 for l in lines if l.startswith(today) and "Out of capacity. Retrying in" in l)
+    except FileNotFoundError:
+        return 0
+
 
 def _handle_signal(signum, frame) -> None:
     logger.info("Signal received (%s), shutting down...", signum)
@@ -45,7 +62,6 @@ def is_out_of_capacity(error: oci.exceptions.ServiceError) -> bool:
     return OUT_OF_CAPACITY_MSG in str(error.message)
 
 
-HEARTBEAT_INTERVAL = 3600  # send heartbeat every 1 hour
 LOG_LINES = 10
 
 
@@ -60,9 +76,8 @@ def _send_log_tail() -> None:
 
 
 def _send_log_file() -> None:
-    import datetime
     try:
-        today = datetime.date.today().isoformat()
+        today = _local_now().date().isoformat()
         with open("hunter.log", "r") as f:
             lines = f.readlines()
         today_lines = [l for l in lines if l.startswith(today)]
@@ -78,7 +93,8 @@ def _format_status() -> str:
     attempt = _state["attempt"]
     elapsed = int(time.time() - _state["start_time"])
     h, m = divmod(elapsed // 60, 60)
-    return f"Attempt #{attempt}, running for {h}h {m:02d}m"
+    today = _local_now().date().isoformat()
+    return f"Attempt #{attempt} today ({today}), running for {h}h {m:02d}m"
 
 
 def _bot_listener() -> None:
@@ -117,16 +133,16 @@ def run() -> None:
         logger.info("=== OracleInstanceHunter finished. Nothing to do ===")
         return
 
-    _state["attempt"] = 0
+    _state["attempt"] = _count_today_attempts()
     _state["start_time"] = time.time()
-    last_heartbeat = time.time()
+    last_heartbeat_hour = _local_now().hour
 
     while not _stop_event.is_set():
         _state["attempt"] += 1
-        now = time.time()
-        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+        current_hour = _local_now().hour
+        if current_hour != last_heartbeat_hour:
             notifier.notify_heartbeat(_state["attempt"])
-            last_heartbeat = now
+            last_heartbeat_hour = current_hour
 
         try:
             result = oci_client.launch_instance()
@@ -143,9 +159,11 @@ def run() -> None:
                 continue
             else:
                 logger.error("OCI service error: %s", e)
+                notifier.send_message(f"OCI service error:\n<code>{e}</code>")
 
         except Exception as e:
             logger.error("Unexpected error: %s", e)
+            notifier.send_message(f"Unexpected error:\n<code>{e}</code>")
 
         delay = random.randint(121, 147)
         _stop_event.wait(delay)
