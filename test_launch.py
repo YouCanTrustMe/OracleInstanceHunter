@@ -1,9 +1,8 @@
 """
 One-shot test: launch VM.Standard.E2.1.Micro (AMD x86_64), send Telegram notification,
-print instance OCID so you can delete it afterwards in OCI Console.
+then optionally terminate the instance immediately.
 
 Run: python test_launch.py
-Delete: OCI Console → Compute → Instances → test-amd-delete-me → Terminate
 """
 
 import oci
@@ -37,6 +36,19 @@ def _find_ubuntu_amd_image(compute: oci.core.ComputeClient) -> str:
     if not images:
         raise RuntimeError(f"No Ubuntu 22.04 image found for shape {TEST_SHAPE}")
     return images[0].id
+
+
+def terminate_instance(compute: oci.core.ComputeClient, instance_id: str) -> None:
+    print("Terminating instance...")
+    compute.terminate_instance(instance_id, preserve_boot_volume=False)
+    oci.wait_until(
+        compute,
+        compute.get_instance(instance_id),
+        "lifecycle_state",
+        "TERMINATED",
+        max_wait_seconds=300,
+    )
+    print("Instance terminated and boot volume deleted.")
 
 
 def main() -> None:
@@ -88,13 +100,18 @@ def main() -> None:
     public_ip = vnic.public_ip
 
     print(f"\nInstance is RUNNING!")
-    print(f"Name: {TEST_NAME}")
+    print(f"Name:      {TEST_NAME}")
     print(f"Public IP: {public_ip}")
-    print(f"SSH: ssh -i ~/.ssh/oracle_arm_key ubuntu@{public_ip}")
-    print(f"\nTo delete: OCI Console → Compute → Instances → {TEST_NAME} → Terminate")
+    print(f"SSH:       ssh -i ~/.ssh/oracle_arm_key ubuntu@{public_ip}")
 
     notifier.notify_success(TEST_NAME, public_ip, config.OCI_REGION)
     print("Telegram notification sent.")
+
+    answer = input("\nDelete instance now? (y/n): ").strip().lower()
+    if answer == "y":
+        terminate_instance(compute, instance.id)
+    else:
+        print(f"Kept alive. To delete later: OCI Console → Compute → Instances → {TEST_NAME} → Terminate")
 
 
 if __name__ == "__main__":
