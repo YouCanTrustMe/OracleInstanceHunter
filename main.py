@@ -49,6 +49,33 @@ def _count_today_attempts() -> int:
         return 0
 
 
+def _rotate_log(date: datetime.date, total_attempts: int) -> None:
+    date_str = date.isoformat()
+    try:
+        with open("hunter.log", "r") as f:
+            lines = f.readlines()
+        day_lines = [l for l in lines if l.startswith(date_str)]
+
+        capacity_errors = sum(1 for l in day_lines if "Out of capacity. Retrying in" in l)
+        oci_errors = sum(1 for l in day_lines if "OCI service error:" in l)
+        unexpected = sum(1 for l in day_lines if "Unexpected error:" in l)
+
+        summary = (
+            f"Daily summary {date_str}:\n"
+            f"Attempts: {total_attempts}\n"
+            f"Out of capacity: {capacity_errors}\n"
+            f"OCI errors: {oci_errors}\n"
+            f"Unexpected errors: {unexpected}"
+        )
+        notifier.send_message(summary, silent=True)
+
+        with open("hunter.log", "w"):
+            pass
+        logger.info("=== Log rotated for %s ===", date_str)
+    except Exception as e:
+        logger.warning("Log rotation failed: %s", e)
+
+
 def _handle_signal(signum, frame) -> None:
     logger.info("Signal received (%s), shutting down...", signum)
     _stop_event.set()
@@ -136,10 +163,16 @@ def run() -> None:
     _state["attempt"] = _count_today_attempts()
     _state["start_time"] = time.time()
     last_heartbeat_hour = _local_now().hour
+    last_day = _local_now().date()
 
     while not _stop_event.is_set():
+        now = _local_now()
+        if now.date() != last_day:
+            _rotate_log(last_day, _state["attempt"])
+            _state["attempt"] = 0
+            last_day = now.date()
         _state["attempt"] += 1
-        current_hour = _local_now().hour
+        current_hour = now.hour
         if current_hour != last_heartbeat_hour:
             notifier.notify_heartbeat(_state["attempt"])
             last_heartbeat_hour = current_hour
