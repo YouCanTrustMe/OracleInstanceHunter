@@ -1,5 +1,7 @@
 .env
+local.env
 *.pem
+*key*
 *.log
 __pycache__/
 *.pyc
