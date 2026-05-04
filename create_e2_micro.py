@@ -4,8 +4,10 @@ import sys
 import subprocess
 import requests
 import oci
+from dotenv import load_dotenv
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(SCRIPT_DIR, "local.env"))
 
 ACCOUNTS = {
     "zurich": {
@@ -17,8 +19,8 @@ ACCOUNTS = {
         "subnet_id":           "***REMOVED_OCID***",
         "availability_domain": "saWo:EU-ZURICH-1-AD-1",
         "instance_name":       "micro-zurich-2",
-        "telegram_token":      "***REMOVED_TOKEN***",
-        "telegram_chat_id":    "709257506",
+        "telegram_token":      os.environ["TELEGRAM_TOKEN_ZURICH"],
+        "telegram_chat_id":    os.environ["TELEGRAM_CHAT_ID"],
     },
     "amsterdam": {
         "user":                "***REMOVED_OCID***",
@@ -29,8 +31,8 @@ ACCOUNTS = {
         "subnet_id":           "***REMOVED_OCID***",
         "availability_domain": "yYIS:eu-amsterdam-1-AD-1",
         "instance_name":       "micro-amsterdam-2",
-        "telegram_token":      "***REMOVED_TOKEN***",
-        "telegram_chat_id":    "709257506",
+        "telegram_token":      os.environ["TELEGRAM_TOKEN_AMSTERDAM"],
+        "telegram_chat_id":    os.environ["TELEGRAM_CHAT_ID"],
     },
 }
 
