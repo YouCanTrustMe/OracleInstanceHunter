@@ -60,7 +60,31 @@ def find_existing_instance() -> dict | None:
     return None
 
 
-def launch_instance() -> dict | None:
+def _wait_for_public_ip(compute, network, instance_id) -> str | None:
+    """Best-effort: wait for RUNNING and fetch the public IP. Never raises — the
+    instance is already created, so a failure here must not bubble up and make
+    the caller retry (which would create a duplicate)."""
+    try:
+        oci.wait_until(
+            compute,
+            compute.get_instance(instance_id),
+            "lifecycle_state",
+            "RUNNING",
+            max_wait_seconds=300,
+        )
+        vnic_attachments = compute.list_vnic_attachments(
+            compartment_id=config.COMPARTMENT_ID,
+            instance_id=instance_id,
+        ).data
+        if vnic_attachments:
+            vnic = network.get_vnic(vnic_attachments[0].vnic_id).data
+            return vnic.public_ip
+    except Exception:
+        pass
+    return None
+
+
+def launch_instance() -> dict:
     oci_config = _build_oci_config()
     compute = oci.core.ComputeClient(oci_config)
     network = oci.core.VirtualNetworkClient(oci_config)
@@ -91,23 +115,12 @@ def launch_instance() -> dict | None:
     response = compute.launch_instance(details)
     instance = response.data
 
-    oci.wait_until(
-        compute,
-        compute.get_instance(instance.id),
-        "lifecycle_state",
-        "RUNNING",
-        max_wait_seconds=300,
-    )
-
-    vnic_attachments = compute.list_vnic_attachments(
-        compartment_id=config.COMPARTMENT_ID,
-        instance_id=instance.id,
-    ).data
-
-    vnic = network.get_vnic(vnic_attachments[0].vnic_id).data
+    # Instance now exists — fetch its IP best-effort (never raises, so the caller
+    # won't retry and create a duplicate). "pending" can be looked up later.
+    public_ip = _wait_for_public_ip(compute, network, instance.id)
 
     return {
         "name": instance.display_name,
-        "public_ip": vnic.public_ip,
+        "public_ip": public_ip or "pending",
         "region": config.OCI_REGION,
     }

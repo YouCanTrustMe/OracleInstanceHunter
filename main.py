@@ -89,6 +89,31 @@ def is_out_of_capacity(error: oci.exceptions.ServiceError) -> bool:
     return OUT_OF_CAPACITY_MSG in str(error.message)
 
 
+def _notify_success_safe(result: dict) -> None:
+    """Notify success without ever raising — the instance is already created, so
+    a Telegram failure must not prevent the loop from stopping."""
+    try:
+        notifier.notify_success(result["name"], result["public_ip"], result["region"])
+    except Exception as e:
+        logger.error("notify_success failed (instance IS created): %s", e)
+
+
+def _maybe_finish_on_existing() -> bool:
+    """If an instance already exists (e.g. a prior attempt created one but failed
+    before reporting, or the quota is full because it succeeded), notify and tell
+    the loop to stop instead of creating a duplicate / spamming errors."""
+    try:
+        existing = oci_client.find_existing_instance()
+    except Exception as e:
+        logger.warning("Existence check failed: %s", e)
+        return False
+    if not existing:
+        return False
+    logger.info("Instance already running: %s | IP: %s", existing["name"], existing["public_ip"])
+    notifier.notify_already_exists(existing["name"], existing["public_ip"], existing["region"], existing["state"])
+    return True
+
+
 LOG_LINES = 10
 
 
@@ -180,7 +205,7 @@ def run() -> None:
         try:
             result = oci_client.launch_instance()
             logger.info("Instance created: %s | IP: %s", result["name"], result["public_ip"])
-            notifier.notify_success(result["name"], result["public_ip"], result["region"])
+            _notify_success_safe(result)
             logger.info("=== OracleInstanceHunter finished. Instance is ready ===")
             break
 
@@ -190,11 +215,16 @@ def run() -> None:
                 logger.info("Out of capacity. Retrying in %d seconds...", delay)
                 _stop_event.wait(delay)
                 continue
-            else:
-                logger.error("OCI service error: %s", e)
-                notifier.send_message(f"OCI service error:\n<code>{e}</code>")
+            # Non-capacity error (e.g. LimitExceeded). It often means an instance
+            # already exists — stop before alerting to avoid endless error spam.
+            if _maybe_finish_on_existing():
+                break
+            logger.error("OCI service error: %s", e)
+            notifier.send_message(f"OCI service error:\n<code>{e}</code>")
 
         except Exception as e:
+            if _maybe_finish_on_existing():
+                break
             logger.error("Unexpected error: %s", e)
             notifier.send_message(f"Unexpected error:\n<code>{e}</code>")
 
