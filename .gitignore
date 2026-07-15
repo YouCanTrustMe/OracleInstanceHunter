@@ -1,9 +1,11 @@
 .env
 local.env
 accounts.json
+secrets/
 *.pem
 *key*
 *.log
+.DS_Store
 __pycache__/
 *.pyc
 .venv/

@@ -9,7 +9,8 @@ from dotenv import load_dotenv
 from accounts_config import load_accounts
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-load_dotenv(os.path.join(SCRIPT_DIR, "local.env"))
+BASE_DIR = os.path.dirname(SCRIPT_DIR)  # repo root: local.env, *.pem and generated keys live here
+load_dotenv(os.path.join(BASE_DIR, "local.env"))
 
 ACCOUNTS = load_accounts()
 for _name, _cfg in ACCOUNTS.items():
@@ -50,7 +51,9 @@ def _find_ubuntu_amd64_image(compute, compartment_id):
 
 
 def _generate_ssh_key(instance_name):
-    key_path = os.path.join(SCRIPT_DIR, f"ssh_{instance_name}_key")
+    secrets_dir = os.path.join(BASE_DIR, "secrets")
+    os.makedirs(secrets_dir, exist_ok=True)
+    key_path = os.path.join(secrets_dir, f"ssh_{instance_name}_key")
     for path in (key_path, key_path + ".pub"):
         if os.path.exists(path):
             os.remove(path)

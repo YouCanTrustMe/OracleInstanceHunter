@@ -7,8 +7,9 @@ committed. Copy accounts.example.json -> accounts.json and fill in your values.
 import os
 import json
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_ACCOUNTS_FILE = os.path.join(SCRIPT_DIR, "accounts.json")
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(TOOLS_DIR)  # repo root: accounts.json and *.pem live here
+_ACCOUNTS_FILE = os.path.join(BASE_DIR, "accounts.json")
 
 
 def load_accounts() -> dict:
@@ -16,5 +17,5 @@ def load_accounts() -> dict:
         accounts = json.load(f)
     for cfg in accounts.values():
         if "key_file" in cfg:
-            cfg["key_file"] = os.path.join(SCRIPT_DIR, cfg["key_file"])
+            cfg["key_file"] = os.path.join(BASE_DIR, cfg["key_file"])
     return accounts

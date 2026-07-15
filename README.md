@@ -92,7 +92,15 @@ sudo journalctl -u oracle-hunter -f
 ├── config.py               # Loads all config from .env
 ├── oci_client.py           # OCI API: launch instance, detect image, get public IP
 ├── notifier.py             # Telegram notifications (silent/loud)
+├── server_stats.py         # Server load snapshot (/load command)
 ├── oracle-hunter.service   # systemd unit file
 ├── .env.example            # Config template
-└── requirements.txt
+├── accounts.example.json   # Template for gitignored accounts.json (used by tools/)
+├── requirements.txt
+├── test_launch.py          # Manual launch/terminate test helper
+├── tools/                  # Local-only helper scripts (not deployed to servers)
+│   ├── manage_servers.py   # List / reboot instances across accounts
+│   ├── create_e2_micro.py  # One-shot E2.1.Micro creation
+│   └── accounts_config.py  # Loads gitignored accounts.json
+└── secrets/                # Gitignored: OCI API keys (*.pem) + generated SSH keys
 ```
