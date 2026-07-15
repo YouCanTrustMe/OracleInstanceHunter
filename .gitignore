@@ -1,5 +1,6 @@
 .env
 local.env
+accounts.json
 *.pem
 *key*
 *.log

@@ -6,35 +6,15 @@ import requests
 import oci
 from dotenv import load_dotenv
 
+from accounts_config import load_accounts
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(SCRIPT_DIR, "local.env"))
 
-ACCOUNTS = {
-    "zurich": {
-        "user":                "***REMOVED_OCID***",
-        "fingerprint":         "***REMOVED_FP***",
-        "tenancy":             "***REMOVED_OCID***",
-        "region":              "eu-zurich-1",
-        "key_file":            os.path.join(SCRIPT_DIR, "oci_key_zurich.pem"),
-        "subnet_id":           "***REMOVED_OCID***",
-        "availability_domain": "saWo:EU-ZURICH-1-AD-1",
-        "instance_name":       "micro-zurich-2",
-        "telegram_token":      os.environ["TELEGRAM_TOKEN_ZURICH"],
-        "telegram_chat_id":    os.environ["TELEGRAM_CHAT_ID"],
-    },
-    "amsterdam": {
-        "user":                "***REMOVED_OCID***",
-        "fingerprint":         "***REMOVED_FP***",
-        "tenancy":             "***REMOVED_OCID***",
-        "region":              "eu-amsterdam-1",
-        "key_file":            os.path.join(SCRIPT_DIR, "oci_key_amsterdam.pem"),
-        "subnet_id":           "***REMOVED_OCID***",
-        "availability_domain": "yYIS:eu-amsterdam-1-AD-1",
-        "instance_name":       "micro-amsterdam-2",
-        "telegram_token":      os.environ["TELEGRAM_TOKEN_AMSTERDAM"],
-        "telegram_chat_id":    os.environ["TELEGRAM_CHAT_ID"],
-    },
-}
+ACCOUNTS = load_accounts()
+for _name, _cfg in ACCOUNTS.items():
+    _cfg["telegram_token"] = os.environ.get(f"TELEGRAM_TOKEN_{_name.upper()}", "")
+    _cfg["telegram_chat_id"] = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 
 def _send_telegram(token, chat_id, text):

@@ -1,0 +1,12 @@
+{
+  "myaccount": {
+    "user": "ocid1.user.oc1..xxxxxxxx",
+    "fingerprint": "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99",
+    "tenancy": "ocid1.tenancy.oc1..xxxxxxxx",
+    "region": "eu-frankfurt-1",
+    "key_file": "oci_key_myaccount.pem",
+    "subnet_id": "ocid1.subnet.oc1.eu-frankfurt-1.xxxxxxxx",
+    "availability_domain": "xxxx:EU-FRANKFURT-1-AD-1",
+    "instance_name": "micro-myaccount-2"
+  }
+}

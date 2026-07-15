@@ -2,24 +2,11 @@
 import os
 import oci
 
+from accounts_config import load_accounts
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-ACCOUNTS = {
-    "zurich": {
-        "user":        "***REMOVED_OCID***",
-        "fingerprint": "***REMOVED_FP***",
-        "tenancy":     "***REMOVED_OCID***",
-        "region":      "eu-zurich-1",
-        "key_file":    os.path.join(SCRIPT_DIR, "oci_key_zurich.pem"),
-    },
-    "amsterdam": {
-        "user":        "***REMOVED_OCID***",
-        "fingerprint": "***REMOVED_FP***",
-        "tenancy":     "***REMOVED_OCID***",
-        "region":      "eu-amsterdam-1",
-        "key_file":    os.path.join(SCRIPT_DIR, "oci_key_amsterdam.pem"),
-    },
-}
+ACCOUNTS = load_accounts()
 
 
 def _oci_config(account):
