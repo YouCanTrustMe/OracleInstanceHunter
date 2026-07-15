@@ -31,14 +31,24 @@ def _find_ubuntu_arm_image(compute: oci.core.ComputeClient) -> str:
     return images[0].id
 
 
-def find_existing_instance() -> dict | None:
+def running_instance_names() -> set[str]:
+    """Names of all instances currently RUNNING/PROVISIONING/STARTING."""
+    oci_config = _build_oci_config()
+    compute = oci.core.ComputeClient(oci_config)
+    instances = compute.list_instances(compartment_id=config.COMPARTMENT_ID).data
+    return {i.display_name for i in instances
+            if i.lifecycle_state in ("RUNNING", "PROVISIONING", "STARTING")}
+
+
+def find_existing_instance(instance_name: str = None) -> dict | None:
+    instance_name = instance_name or config.INSTANCE_NAME
     oci_config = _build_oci_config()
     compute = oci.core.ComputeClient(oci_config)
     network = oci.core.VirtualNetworkClient(oci_config)
 
     instances = compute.list_instances(
         compartment_id=config.COMPARTMENT_ID,
-        display_name=config.INSTANCE_NAME,
+        display_name=instance_name,
     ).data
 
     for inst in instances:
@@ -84,7 +94,8 @@ def _wait_for_public_ip(compute, network, instance_id) -> str | None:
     return None
 
 
-def launch_instance() -> dict:
+def launch_instance(instance_name: str = None) -> dict:
+    instance_name = instance_name or config.INSTANCE_NAME
     oci_config = _build_oci_config()
     compute = oci.core.ComputeClient(oci_config)
     network = oci.core.VirtualNetworkClient(oci_config)
@@ -95,7 +106,7 @@ def launch_instance() -> dict:
     details = oci.core.models.LaunchInstanceDetails(
         availability_domain=config.AVAILABILITY_DOMAIN,
         compartment_id=config.COMPARTMENT_ID,
-        display_name=config.INSTANCE_NAME,
+        display_name=instance_name,
         shape=config.SHAPE,
         shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
             ocpus=config.OCPUS,

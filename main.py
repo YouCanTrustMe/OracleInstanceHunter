@@ -98,20 +98,35 @@ def _notify_success_safe(result: dict) -> None:
         logger.error("notify_success failed (instance IS created): %s", e)
 
 
-def _maybe_finish_on_existing() -> bool:
-    """If an instance already exists (e.g. a prior attempt created one but failed
-    before reporting, or the quota is full because it succeeded), notify and tell
-    the loop to stop instead of creating a duplicate / spamming errors."""
+def _slot_names() -> list:
+    """Target instance names: base, then base-2, base-3 ... up to TARGET_INSTANCES."""
+    base = config.INSTANCE_NAME
+    return [base] + [f"{base}-{i}" for i in range(2, config.TARGET_INSTANCES + 1)]
+
+
+def _have_slots() -> set:
+    """Which of our target slots are already filled by a running instance."""
     try:
-        existing = oci_client.find_existing_instance()
+        running = oci_client.running_instance_names()
     except Exception as e:
-        logger.warning("Existence check failed: %s", e)
-        return False
-    if not existing:
-        return False
-    logger.info("Instance already running: %s | IP: %s", existing["name"], existing["public_ip"])
-    notifier.notify_already_exists(existing["name"], existing["public_ip"], existing["region"], existing["state"])
-    return True
+        logger.warning("Instance listing failed: %s", e)
+        return set()
+    return set(_slot_names()) & running
+
+
+def _announce_unnotified(have: set, notified: set) -> None:
+    """Send a Telegram notice + SSH keys for any filled slot not yet announced
+    (covers instances a failed attempt created but never reported)."""
+    for name in sorted(have - notified):
+        try:
+            info = oci_client.find_existing_instance(name)
+        except Exception as e:
+            logger.warning("Lookup of %s failed: %s", name, e)
+            info = None
+        if info:
+            logger.info("Instance already running: %s | IP: %s", info["name"], info["public_ip"])
+            notifier.notify_already_exists(info["name"], info["public_ip"], info["region"], info["state"])
+        notified.add(name)
 
 
 LOG_LINES = 10
@@ -174,15 +189,18 @@ def _bot_listener() -> None:
 
 
 def run() -> None:
-    logger.info("=== OracleInstanceHunter started. Random delay: 121-147s between attempts ===")
+    target = config.TARGET_INSTANCES
+    logger.info("=== OracleInstanceHunter started. Target: %d instance(s). Random delay: 121-147s ===", target)
     threading.Thread(target=_bot_listener, daemon=True).start()
     notifier.notify_started()
 
-    existing = oci_client.find_existing_instance()
-    if existing:
-        logger.info("Instance already exists: %s | IP: %s | State: %s", existing["name"], existing["public_ip"], existing["state"])
-        notifier.notify_already_exists(existing["name"], existing["public_ip"], existing["region"], existing["state"])
-        logger.info("=== OracleInstanceHunter finished. Nothing to do ===")
+    slots = _slot_names()
+    have = _have_slots()
+    notified: set = set()
+    if have:
+        _announce_unnotified(have, notified)
+    if len(have) >= target:
+        logger.info("Already have %d/%d instance(s): %s. Nothing to do.", len(have), target, sorted(have))
         return
 
     _state["attempt"] = _count_today_attempts()
@@ -190,7 +208,7 @@ def run() -> None:
     last_heartbeat_hour = _local_now().hour
     last_day = _local_now().date()
 
-    while not _stop_event.is_set():
+    while not _stop_event.is_set() and len(have) < target:
         now = _local_now()
         if now.date() != last_day:
             _rotate_log(last_day, _state["attempt"])
@@ -202,12 +220,18 @@ def run() -> None:
             notifier.notify_heartbeat(_state["attempt"])
             last_heartbeat_hour = current_hour
 
+        next_name = next(n for n in slots if n not in have)
+        prev_count = len(have)
+
         try:
-            result = oci_client.launch_instance()
-            logger.info("Instance created: %s | IP: %s", result["name"], result["public_ip"])
+            result = oci_client.launch_instance(next_name)
+            have.add(result["name"])
+            logger.info("Instance created: %s | IP: %s (%d/%d)", result["name"], result["public_ip"], len(have), target)
             _notify_success_safe(result)
-            logger.info("=== OracleInstanceHunter finished. Instance is ready ===")
-            break
+            notified.add(result["name"])
+            if len(have) >= target:
+                logger.info("=== OracleInstanceHunter finished. All %d instance(s) ready ===", target)
+                break
 
         except oci.exceptions.ServiceError as e:
             if is_out_of_capacity(e):
@@ -215,18 +239,29 @@ def run() -> None:
                 logger.info("Out of capacity. Retrying in %d seconds...", delay)
                 _stop_event.wait(delay)
                 continue
-            # Non-capacity error (e.g. LimitExceeded). It often means an instance
-            # already exists — stop before alerting to avoid endless error spam.
-            if _maybe_finish_on_existing():
+            # Non-capacity error (e.g. LimitExceeded). Re-check what actually
+            # exists: the attempt may have created an instance, or the account
+            # cap may already be met — announce those and stop before spamming.
+            have = _have_slots()
+            _announce_unnotified(have, notified)
+            if len(have) >= target:
                 break
-            logger.error("OCI service error: %s", e)
-            notifier.send_message(f"OCI service error:\n<code>{e}</code>")
+            if len(have) > prev_count:
+                logger.info("Instance created despite error; hunting remaining slot(s)")
+            else:
+                logger.error("OCI service error: %s", e)
+                notifier.send_message(f"OCI service error:\n<code>{e}</code>")
 
         except Exception as e:
-            if _maybe_finish_on_existing():
+            have = _have_slots()
+            _announce_unnotified(have, notified)
+            if len(have) >= target:
                 break
-            logger.error("Unexpected error: %s", e)
-            notifier.send_message(f"Unexpected error:\n<code>{e}</code>")
+            if len(have) > prev_count:
+                logger.info("Instance created despite error; hunting remaining slot(s)")
+            else:
+                logger.error("Unexpected error: %s", e)
+                notifier.send_message(f"Unexpected error:\n<code>{e}</code>")
 
         delay = random.randint(121, 147)
         _stop_event.wait(delay)

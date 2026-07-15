@@ -15,6 +15,7 @@ IMAGE_ID = os.environ.get("IMAGE_ID", "")
 AVAILABILITY_DOMAIN = os.environ["AVAILABILITY_DOMAIN"]
 
 INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "arm-instance")
+TARGET_INSTANCES = int(os.environ.get("TARGET_INSTANCES", "1"))
 OCPUS = float(os.environ.get("OCPUS", "4"))
 MEMORY_GB = float(os.environ.get("MEMORY_GB", "24"))
 SHAPE = os.environ.get("SHAPE", "VM.Standard.A1.Flex")
