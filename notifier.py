@@ -1,8 +1,11 @@
+import logging
 import smtplib
 from email.message import EmailMessage
 
 import requests
 import config
+
+logger = logging.getLogger(__name__)
 
 
 def send_email(subject: str, body: str, attachments: list = None) -> None:
@@ -33,6 +36,7 @@ def send_email(subject: str, body: str, attachments: list = None) -> None:
 
 
 def send_message(text: str, silent: bool = False) -> None:
+    """Never raises — a Telegram outage must not crash the hunter."""
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": config.TELEGRAM_CHAT_ID,
@@ -40,7 +44,10 @@ def send_message(text: str, silent: bool = False) -> None:
         "parse_mode": "HTML",
         "disable_notification": silent,
     }
-    requests.post(url, json=payload, timeout=10)
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        logger.warning("Telegram send failed: %s", e)
 
 
 def notify_already_exists(instance_name: str, public_ip: str, region: str, state: str) -> None:
