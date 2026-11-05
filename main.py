@@ -131,7 +131,10 @@ def _have_slots(previous: set = None):
 
 
 def _is_transient(e: Exception) -> bool:
-    """Network-level failure (connection reset, SSL EOF, timeout) — not an OCI answer."""
+    """Network-level failure (connection reset, SSL EOF, timeout) or a temporary
+    OCI answer (429 rate limit, 5xx) — worth a quiet retry, not an alert."""
+    if isinstance(e, oci.exceptions.ServiceError):
+        return e.status == 429 or e.status >= 500
     return isinstance(e, (requests.exceptions.RequestException, oci.exceptions.RequestException,
                           oci.exceptions.ConnectTimeout, ConnectionError, TimeoutError))
 
@@ -289,8 +292,9 @@ def run() -> None:
                 logger.info("=== OracleInstanceHunter finished. All %d instance(s) ready ===", target)
                 break
 
-        except oci.exceptions.ServiceError as e:
-            if is_out_of_capacity(e):
+        except Exception as e:
+            is_service = isinstance(e, oci.exceptions.ServiceError)
+            if is_service and is_out_of_capacity(e):
                 if transient_streak >= TRANSIENT_ALERT_AFTER:
                     notifier.send_message("Connection to OCI restored, hunting normally.", silent=True)
                 transient_streak = 0
@@ -298,20 +302,9 @@ def run() -> None:
                 logger.info("Out of capacity. Retrying in %d seconds... [%s]", delay, ads_label)
                 _stop_event.wait(delay)
                 continue
-            # Non-capacity error (e.g. LimitExceeded). Re-check what actually
-            # exists: the attempt may have created an instance, or the account
-            # cap may already be met — announce those and stop before spamming.
-            have = _have_slots(have)
-            _announce_unnotified(have, notified)
-            if len(have) >= target:
-                break
-            if len(have) > prev_count:
-                logger.info("Instance created despite error; hunting remaining slot(s)")
-            else:
-                logger.error("OCI service error: %s", e)
-                notifier.send_message(f"OCI service error:\n<code>{e}</code>")
-
-        except Exception as e:
+            # Any other error: re-check what actually exists — the attempt may
+            # have created an instance, or the account cap may already be met.
+            # Announce those and stop before spamming or creating duplicates.
             have = _have_slots(have)
             _announce_unnotified(have, notified)
             if len(have) >= target:
@@ -319,15 +312,17 @@ def run() -> None:
             if len(have) > prev_count:
                 logger.info("Instance created despite error; hunting remaining slot(s)")
             elif _is_transient(e):
-                # Network blip: retry quietly; alert only if it keeps happening.
+                # Network blip / rate limit: retry quietly; alert only if it persists.
                 transient_streak += 1
-                logger.warning("Network error (%d in a row): %s", transient_streak, e)
+                logger.warning("Temporary error (%d in a row): %s", transient_streak,
+                               f"{e.status} {e.code}" if is_service else e)
                 if transient_streak == TRANSIENT_ALERT_AFTER:
                     notifier.send_message(
                         f"Can't reach OCI for {transient_streak} attempts in a row (still retrying):\n<code>{e}</code>")
             else:
-                logger.error("Unexpected error: %s", e)
-                notifier.send_message(f"Unexpected error:\n<code>{e}</code>")
+                label = "OCI service error" if is_service else "Unexpected error"
+                logger.error("%s: %s", label, e)
+                notifier.send_message(f"{label}:\n<code>{e}</code>")
 
         delay = random.randint(121, 147)
         _stop_event.wait(delay)
