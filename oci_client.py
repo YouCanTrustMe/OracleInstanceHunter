@@ -94,8 +94,9 @@ def _wait_for_public_ip(compute, network, instance_id) -> str | None:
     return None
 
 
-def launch_instance(instance_name: str = None) -> dict:
+def launch_instance(instance_name: str = None, availability_domain: str = None) -> dict:
     instance_name = instance_name or config.INSTANCE_NAME
+    availability_domain = availability_domain or config.AVAILABILITY_DOMAINS[0]
     oci_config = _build_oci_config()
     compute = oci.core.ComputeClient(oci_config)
     network = oci.core.VirtualNetworkClient(oci_config)
@@ -104,7 +105,7 @@ def launch_instance(instance_name: str = None) -> dict:
     image_id = config.IMAGE_ID if config.IMAGE_ID else _find_ubuntu_arm_image(compute)
 
     details = oci.core.models.LaunchInstanceDetails(
-        availability_domain=config.AVAILABILITY_DOMAIN,
+        availability_domain=availability_domain,
         compartment_id=config.COMPARTMENT_ID,
         display_name=instance_name,
         shape=config.SHAPE,

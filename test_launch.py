@@ -64,7 +64,7 @@ def main() -> None:
     print(f"Image: {image_id}")
 
     details = oci.core.models.LaunchInstanceDetails(
-        availability_domain=config.AVAILABILITY_DOMAIN,
+        availability_domain=config.AVAILABILITY_DOMAINS[0],
         compartment_id=config.COMPARTMENT_ID,
         display_name=TEST_NAME,
         shape=TEST_SHAPE,

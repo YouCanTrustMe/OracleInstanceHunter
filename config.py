@@ -12,7 +12,8 @@ OCI_KEY_FILE = os.environ["OCI_KEY_FILE"]
 COMPARTMENT_ID = os.environ["COMPARTMENT_ID"]
 SUBNET_ID = os.environ["SUBNET_ID"]
 IMAGE_ID = os.environ.get("IMAGE_ID", "")
-AVAILABILITY_DOMAIN = os.environ["AVAILABILITY_DOMAIN"]
+# One AD, or several comma-separated: each cycle tries them all in order.
+AVAILABILITY_DOMAINS = [ad.strip() for ad in os.environ["AVAILABILITY_DOMAIN"].split(",") if ad.strip()]
 
 INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "arm-instance")
 TARGET_INSTANCES = int(os.environ.get("TARGET_INSTANCES", "1"))
@@ -32,5 +33,3 @@ EMAIL_SMTP_PORT = int(os.environ.get("EMAIL_SMTP_PORT", "465"))
 EMAIL_USER = os.environ.get("EMAIL_USER", "")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "") or EMAIL_USER
-
-POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "30"))

@@ -15,10 +15,23 @@ import server_stats
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M")
 _fmt.converter = lambda ts: time.gmtime(ts + 7200)  # UTC+2
 
+class _RedactSecrets(logging.Filter):
+    """Mask the Telegram bot token (it appears inside request URLs in errors)."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        token = config.TELEGRAM_BOT_TOKEN
+        if token:
+            msg = record.getMessage()
+            if token in msg:
+                record.msg, record.args = msg.replace(token, "***"), None
+        return True
+
+
 _fh = logging.FileHandler("hunter.log")
 _fh.setFormatter(_fmt)
+_fh.addFilter(_RedactSecrets())
 _sh = logging.StreamHandler()
 _sh.setFormatter(_fmt)
+_sh.addFilter(_RedactSecrets())
 
 logging.getLogger().setLevel(logging.INFO)
 logging.getLogger().addHandler(_fh)
@@ -104,14 +117,45 @@ def _slot_names() -> list:
     return [base] + [f"{base}-{i}" for i in range(2, config.TARGET_INSTANCES + 1)]
 
 
-def _have_slots() -> set:
-    """Which of our target slots are already filled by a running instance."""
+def _have_slots(previous: set = None):
+    """Which of our target slots are already filled by a running instance.
+    If the listing fails, return `previous` unchanged — never forget a slot we
+    already won (that would re-launch its name and create a duplicate)."""
     try:
         running = oci_client.running_instance_names()
     except Exception as e:
         logger.warning("Instance listing failed: %s", e)
-        return set()
+        return previous
     return set(_slot_names()) & running
+
+
+def _is_transient(e: Exception) -> bool:
+    """Network-level failure (connection reset, SSL EOF, timeout) — not an OCI answer."""
+    return isinstance(e, (requests.exceptions.RequestException, oci.exceptions.RequestException,
+                          oci.exceptions.ConnectTimeout, ConnectionError, TimeoutError))
+
+
+TRANSIENT_ALERT_AFTER = 5  # consecutive network failures (~12 min) before a Telegram alert
+
+
+def _launch_any_ad(name: str) -> dict:
+    """Try every configured AD in turn. Capacity errors move on to the next AD;
+    any other error stops the round immediately (the caller re-checks for dupes)."""
+    last_capacity_error = None
+    for i, ad in enumerate(config.AVAILABILITY_DOMAINS):
+        if i:
+            _stop_event.wait(2)
+        try:
+            return oci_client.launch_instance(name, ad)
+        except oci.exceptions.ServiceError as e:
+            if not is_out_of_capacity(e):
+                raise
+            last_capacity_error = e
+    raise last_capacity_error
+
+
+def _ad_short(ad: str) -> str:
+    return ad.rsplit("-", 1)[-1] if "-AD-" in ad.upper() else ad
 
 
 def _announce_unnotified(have: set, notified: set) -> None:
@@ -195,7 +239,14 @@ def run() -> None:
     notifier.notify_started()
 
     slots = _slot_names()
+    # Must know what already exists before launching anything — otherwise a
+    # listing failure at startup could re-create an existing slot (duplicate).
     have = _have_slots()
+    while have is None and not _stop_event.is_set():
+        _stop_event.wait(60)
+        have = _have_slots()
+    if have is None:
+        return
     notified: set = set()
     if have:
         _announce_unnotified(have, notified)
@@ -207,6 +258,8 @@ def run() -> None:
     _state["start_time"] = time.time()
     last_heartbeat_hour = _local_now().hour
     last_day = _local_now().date()
+    transient_streak = 0
+    ads_label = ",".join(_ad_short(ad) for ad in config.AVAILABILITY_DOMAINS)
 
     while not _stop_event.is_set() and len(have) < target:
         now = _local_now()
@@ -224,7 +277,8 @@ def run() -> None:
         prev_count = len(have)
 
         try:
-            result = oci_client.launch_instance(next_name)
+            result = _launch_any_ad(next_name)
+            transient_streak = 0
             have.add(result["name"])
             logger.info("Instance created: %s | IP: %s (%d/%d)", result["name"], result["public_ip"], len(have), target)
             _notify_success_safe(result)
@@ -235,14 +289,17 @@ def run() -> None:
 
         except oci.exceptions.ServiceError as e:
             if is_out_of_capacity(e):
+                if transient_streak >= TRANSIENT_ALERT_AFTER:
+                    notifier.send_message("Connection to OCI restored, hunting normally.", silent=True)
+                transient_streak = 0
                 delay = random.randint(121, 147)
-                logger.info("Out of capacity. Retrying in %d seconds...", delay)
+                logger.info("Out of capacity. Retrying in %d seconds... [%s]", delay, ads_label)
                 _stop_event.wait(delay)
                 continue
             # Non-capacity error (e.g. LimitExceeded). Re-check what actually
             # exists: the attempt may have created an instance, or the account
             # cap may already be met — announce those and stop before spamming.
-            have = _have_slots()
+            have = _have_slots(have)
             _announce_unnotified(have, notified)
             if len(have) >= target:
                 break
@@ -253,12 +310,19 @@ def run() -> None:
                 notifier.send_message(f"OCI service error:\n<code>{e}</code>")
 
         except Exception as e:
-            have = _have_slots()
+            have = _have_slots(have)
             _announce_unnotified(have, notified)
             if len(have) >= target:
                 break
             if len(have) > prev_count:
                 logger.info("Instance created despite error; hunting remaining slot(s)")
+            elif _is_transient(e):
+                # Network blip: retry quietly; alert only if it keeps happening.
+                transient_streak += 1
+                logger.warning("Network error (%d in a row): %s", transient_streak, e)
+                if transient_streak == TRANSIENT_ALERT_AFTER:
+                    notifier.send_message(
+                        f"Can't reach OCI for {transient_streak} attempts in a row (still retrying):\n<code>{e}</code>")
             else:
                 logger.error("Unexpected error: %s", e)
                 notifier.send_message(f"Unexpected error:\n<code>{e}</code>")
