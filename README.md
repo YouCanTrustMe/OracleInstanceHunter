@@ -1,14 +1,19 @@
 # OracleInstanceHunter
 
-Polls the OCI API and automatically creates a **VM.Standard.A1.Flex** ARM instance (4 OCPUs, 24 GB RAM, Ubuntu 22.04) the moment capacity becomes available. Sends a Telegram notification on success.
+Hunts for Oracle Cloud **Always Free ARM** capacity. It keeps trying to create a **VM.Standard.A1.Flex** instance (Ubuntu 22.04 aarch64) and tells you on Telegram (and optionally by email) the moment it succeeds.
 
-## How it works
+## Features
 
-- Tries to launch the ARM instance every `POLL_INTERVAL` seconds (120 recommended)
-- Silently retries on "Out of host capacity"
-- Sends a **silent** Telegram message on startup and every 30 min (heartbeat)
-- Sends a **loud** Telegram notification with instance name and public IP on success
-- Responds to bot commands: `/logs` (last 10 lines), `/logfile` (today's log as file)
+- **Polling with jitter**: one attempt every 121–147 s (random), silent retry on "Out of host capacity"
+- **Multiple availability domains**: give a comma-separated list and every cycle tries each AD in turn
+- **Multiple instances**: `TARGET_INSTANCES=2` hunts `arm-instance` + `arm-instance-2` (e.g. two 1 OCPU / 6 GB boxes), resumes correctly after a restart
+- **Duplicate-safe**: never retries once a VM was created; re-checks existing instances after any error
+- **Win notification**: Telegram message with name, public IP, SSH command, plus the SSH key files; optional email with the keys attached (works even if you mute the Telegram chat)
+- **Resilient**: Telegram/SMTP outages never crash the hunter; short network blips are retried quietly (alert only after 5 in a row)
+- **Telegram bot commands**: `/status`, `/logs` (last 10 lines), `/logfile` (today's log), `/load` (CPU/RAM/disk)
+- **Housekeeping**: silent hourly heartbeat, daily log rotation with a summary message, graceful shutdown on SIGTERM, bot token masked in logs
+
+> Since 2026-06-15 the Always Free A1 allowance is **2 OCPU / 12 GB per account** (was 4 / 24).
 
 ## Setup
 
@@ -51,24 +56,21 @@ chmod 600 ~/.oci/oci_api_key.pem
 | `OCI_KEY_FILE` | Path to OCI API private key `.pem` |
 | `COMPARTMENT_ID` | Use tenancy OCID for root compartment |
 | `SUBNET_ID` | Subnet OCID from your VCN |
-| `AVAILABILITY_DOMAIN` | e.g. `saWo:EU-ZURICH-1-AD-1` |
+| `AVAILABILITY_DOMAIN` | e.g. `xxxx:EU-ZURICH-1-AD-1`; several comma-separated to try all ADs of the region |
 | `IMAGE_ID` | Leave empty — auto-detects latest Ubuntu 22.04 aarch64 |
 | `SSH_PUBLIC_KEY_PATH` | Path to `.pub` key for the ARM instance |
 | `TELEGRAM_BOT_TOKEN` | From [@BotFather](https://t.me/BotFather) |
 | `TELEGRAM_CHAT_ID` | Your chat ID (get via Telegram `getUpdates`) |
-| `POLL_INTERVAL` | Seconds between attempts (120 recommended) |
+| `INSTANCE_NAME` | Base display name (default `arm-instance`) |
+| `TARGET_INSTANCES` | How many instances to hunt (default `1`) |
+| `OCPUS` / `MEMORY_GB` | Size of each instance (total must fit 2 OCPU / 12 GB) |
+| `EMAIL_*` | Optional win email over SMTP — see `.env.example` |
 
 ### 5. Run
 
 ```bash
 # foreground
 venv/bin/python main.py
-
-# background (survives SSH disconnect)
-nohup venv/bin/python main.py > hunter.log 2>&1 &
-
-# check it's running
-pgrep -f main.py
 
 # live log
 tail -f hunter.log
@@ -83,6 +85,16 @@ sudo systemctl enable oracle-hunter
 sudo systemctl start oracle-hunter
 sudo systemctl status oracle-hunter
 sudo journalctl -u oracle-hunter -f
+```
+
+### 7. Add swap (recommended on 1 GB micro instances)
+
+Without swap a 1 GB E2.1.Micro can freeze completely when memory runs out.
+
+```bash
+sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+sudo mkswap /swapfile && sudo swapon /swapfile
+echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
 ## Project structure
