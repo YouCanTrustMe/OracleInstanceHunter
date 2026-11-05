@@ -105,14 +105,15 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ├── oci_client.py           # OCI API: launch instance, detect image, get public IP
 ├── notifier.py             # Telegram notifications (silent/loud)
 ├── server_stats.py         # Server load snapshot (/load command)
+├── watchdog.py             # Peer watchdog: alert if the other server stops responding
 ├── oracle-hunter.service   # systemd unit file
 ├── .env.example            # Config template
 ├── accounts.example.json   # Template for gitignored accounts.json (used by tools/)
 ├── requirements.txt
-├── test_launch.py          # Manual launch/terminate test helper
-├── tools/                  # Local-only helper scripts (not deployed to servers)
+├── tools/                  # Helper scripts (run manually, not by the service)
 │   ├── manage_servers.py   # List / reboot instances across accounts
 │   ├── create_e2_micro.py  # One-shot E2.1.Micro creation
+│   ├── test_launch.py      # Manual launch/terminate test (run on a hunter server)
 │   └── accounts_config.py  # Loads gitignored accounts.json
 └── secrets/                # Gitignored: OCI API keys (*.pem) + generated SSH keys
 ```

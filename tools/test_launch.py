@@ -2,8 +2,14 @@
 One-shot test: launch VM.Standard.E2.1.Micro (AMD x86_64), send Telegram notification,
 then optionally terminate the instance immediately.
 
-Run: python test_launch.py
+Runs on a hunter server (uses its .env), from the repo root:
+    venv/bin/python tools/test_launch.py
 """
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import oci
 import config
