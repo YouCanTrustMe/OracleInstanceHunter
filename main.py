@@ -11,6 +11,7 @@ import config
 import oci_client
 import notifier
 import server_stats
+import watchdog
 
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M")
 _fmt.converter = lambda ts: time.gmtime(ts + 7200)  # UTC+2
@@ -236,6 +237,7 @@ def run() -> None:
     target = config.TARGET_INSTANCES
     logger.info("=== OracleInstanceHunter started. Target: %d instance(s). Random delay: 121-147s ===", target)
     threading.Thread(target=_bot_listener, daemon=True).start()
+    watchdog.start(_stop_event)
     notifier.notify_started()
 
     slots = _slot_names()

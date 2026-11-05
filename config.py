@@ -33,3 +33,9 @@ EMAIL_SMTP_PORT = int(os.environ.get("EMAIL_SMTP_PORT", "465"))
 EMAIL_USER = os.environ.get("EMAIL_USER", "")
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
 EMAIL_TO = os.environ.get("EMAIL_TO", "") or EMAIL_USER
+
+# Peer watchdog (optional): watch another server's SSH banner and alert
+# (Telegram + email) if it stops answering. Leave PEER_HOST empty to disable.
+PEER_NAME = os.environ.get("PEER_NAME", "peer")
+PEER_HOST = os.environ.get("PEER_HOST", "")
+PEER_PORT = int(os.environ.get("PEER_PORT", "22"))
