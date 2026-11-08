@@ -10,3 +10,6 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+hunter_state.json
+hunter_state.json.tmp
+logs/

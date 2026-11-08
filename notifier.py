@@ -1,3 +1,4 @@
+import html
 import logging
 import smtplib
 from email.message import EmailMessage
@@ -6,6 +7,11 @@ import requests
 import config
 
 logger = logging.getLogger(__name__)
+
+
+def esc(value) -> str:
+    """Make any text (exception messages, log lines) safe inside parse_mode=HTML."""
+    return html.escape(str(value), quote=False)
 
 
 def send_email(subject: str, body: str, attachments: list = None) -> None:
@@ -30,24 +36,65 @@ def send_email(subject: str, body: str, attachments: list = None) -> None:
             smtp.send_message(msg)
     except Exception as e:
         try:
-            send_message(f"Email alert failed: {e}", silent=True)
+            send_message(f"Email alert failed: {esc(e)}", silent=True)
         except Exception:
             pass
 
 
-def send_message(text: str, silent: bool = False) -> None:
-    """Never raises — a Telegram outage must not crash the hunter."""
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": config.TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_notification": silent,
-    }
+def _api(method: str, files: dict = None, **payload) -> dict | None:
+    """Call the Telegram Bot API (multipart when `files` is given). Never raises;
+    returns the decoded reply or None if Telegram couldn't be reached."""
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/{method}"
+    payload = {"chat_id": config.TELEGRAM_CHAT_ID, **payload}
     try:
-        requests.post(url, json=payload, timeout=10)
+        if files:
+            reply = requests.post(url, data=payload, files=files, timeout=30).json()
+        else:
+            reply = requests.post(url, json=payload, timeout=10).json()
     except Exception as e:
-        logger.warning("Telegram send failed: %s", e)
+        logger.warning("Telegram %s failed: %s", method, e)
+        return None
+    if not reply.get("ok"):
+        logger.warning("Telegram %s refused: %s", method, reply.get("description"))
+    return reply
+
+
+def send_message(text: str, silent: bool = False) -> int | None:
+    """Never raises — a Telegram outage must not crash the hunter. Returns message_id."""
+    reply = _api("sendMessage", text=text, parse_mode="HTML",
+                 disable_notification=silent, disable_web_page_preview=True)
+    return (reply or {}).get("result", {}).get("message_id")
+
+
+def edit_message(message_id: int, text: str) -> str:
+    """Edit a message in place: "ok"; "gone" (deleted / too old — send a new one);
+    "refused" (Telegram said no for another reason); "failed" (no answer: network)."""
+    reply = _api("editMessageText", message_id=message_id, text=text, parse_mode="HTML",
+                 disable_web_page_preview=True)
+    if reply is None:
+        return "failed"
+    desc = str(reply.get("description", ""))
+    if reply.get("ok") or "not modified" in desc:
+        return "ok"
+    if reply.get("error_code") == 429:  # "Too Many Requests: retry after N" — temporary
+        return "failed"
+    return "gone" if ("not found" in desc or "can't be edited" in desc) else "refused"
+
+
+def send_document(filename: str, content: bytes, caption: str = None, silent: bool = True) -> bool:
+    """Upload a file to the chat. Never raises; False (and a log line) if it didn't arrive."""
+    extra = {"caption": caption} if caption else {}
+    reply = _api("sendDocument", files={"document": (filename, content)},
+                 disable_notification=silent, **extra)
+    return bool(reply and reply.get("ok"))
+
+
+def pin_message(message_id: int) -> None:
+    _api("pinChatMessage", message_id=message_id, disable_notification=True)
+
+
+def unpin_message(message_id: int) -> None:
+    _api("unpinChatMessage", message_id=message_id)
 
 
 def notify_already_exists(instance_name: str, public_ip: str, region: str, state: str) -> None:
@@ -69,14 +116,6 @@ def notify_already_exists(instance_name: str, public_ip: str, region: str, state
         f"SSH:\n{ssh_cmd}",
         attachments=_ssh_key_attachments(),
     )
-
-
-def notify_started() -> None:
-    send_message("OracleInstanceHunter started. Polling every 121-147s.", silent=True)
-
-
-def notify_heartbeat(attempt: int) -> None:
-    send_message(f"Still hunting... attempt #{attempt}", silent=True)
 
 
 def notify_success(instance_name: str, public_ip: str, region: str) -> None:
@@ -110,16 +149,12 @@ def _ssh_key_attachments() -> list:
 
 
 def _send_ssh_keys(public_ip: str) -> None:
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendDocument"
-    key_files = _SSH_KEY_FILES
-    for path, filename in key_files:
+    for path, filename in _SSH_KEY_FILES:
         try:
             with open(path, "rb") as f:
-                requests.post(
-                    url,
-                    data={"chat_id": config.TELEGRAM_CHAT_ID, "caption": f"SSH key: {filename}\nIP: {public_ip}"},
-                    files={"document": (filename, f)},
-                    timeout=15,
-                )
+                content = f.read()
         except Exception as e:
-            send_message(f"Could not send SSH key {filename}: {e}", silent=True)
+            send_message(f"Could not send SSH key {filename}: {esc(e)}", silent=True)
+            continue
+        if not send_document(filename, content, caption=f"SSH key: {filename}\nIP: {public_ip}", silent=False):
+            send_message(f"Could not send SSH key {filename} (see /logs)", silent=True)

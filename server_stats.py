@@ -43,11 +43,11 @@ def load_avg() -> tuple[float, float, float]:
 
 
 def memory() -> dict:
-    """Return dict with total_mb, used_mb, free_mb, percent."""
+    """Return dict with total_mb, used_mb, free_mb, percent, swap_total_mb, swap_used_mb."""
     info = {}
     for line in _read_proc("/proc/meminfo").splitlines():
         parts = line.split()
-        if parts[0] in ("MemTotal:", "MemAvailable:"):
+        if parts[0] in ("MemTotal:", "MemAvailable:", "SwapTotal:", "SwapFree:"):
             info[parts[0].rstrip(":")] = int(parts[1])  # kB
     total = info.get("MemTotal", 0)
     available = info.get("MemAvailable", 0)
@@ -58,6 +58,8 @@ def memory() -> dict:
         "used_mb": used // 1024,
         "free_mb": available // 1024,
         "percent": pct,
+        "swap_total_mb": info.get("SwapTotal", 0) // 1024,
+        "swap_used_mb": (info.get("SwapTotal", 0) - info.get("SwapFree", 0)) // 1024,
     }
 
 

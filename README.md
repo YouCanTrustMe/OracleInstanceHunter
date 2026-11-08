@@ -10,8 +10,8 @@ Hunts for Oracle Cloud **Always Free ARM** capacity. It keeps trying to create a
 - **Duplicate-safe**: never retries once a VM was created; re-checks existing instances after any error
 - **Win notification**: Telegram message with name, public IP, SSH command, plus the SSH key files; optional email with the keys attached (works even if you mute the Telegram chat)
 - **Resilient**: Telegram/SMTP outages never crash the hunter; short network blips are retried quietly (alert only after 5 in a row)
-- **Telegram bot commands**: `/status`, `/logs` (last 10 lines), `/logfile` (today's log), `/load` (CPU/RAM/disk)
-- **Housekeeping**: silent hourly heartbeat, daily log rotation with a summary message, graceful shutdown on SIGTERM, bot token masked in logs
+- **Telegram bot commands**: `/status`, `/logs` (last 10 lines), `/logfile` (today's log; `/logfile 07.11` for an earlier day, `/logfile list`), `/load` (CPU/RAM/disk)
+- **Housekeeping**: one pinned status message edited in place (no hourly spam), silent daily summary, logs archived per day for 30 days, times in `TIMEZONE` (default Europe/Kyiv, DST-aware), graceful shutdown on SIGTERM, bot token masked in logs
 
 > Since 2026-06-15 the Always Free A1 allowance is **2 OCPU / 12 GB per account** (was 4 / 24).
 

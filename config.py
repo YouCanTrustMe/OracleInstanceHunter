@@ -1,4 +1,6 @@
 import os
+from zoneinfo import ZoneInfo
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,6 +22,11 @@ TARGET_INSTANCES = int(os.environ.get("TARGET_INSTANCES", "1"))
 OCPUS = float(os.environ.get("OCPUS", "4"))
 MEMORY_GB = float(os.environ.get("MEMORY_GB", "24"))
 SHAPE = os.environ.get("SHAPE", "VM.Standard.A1.Flex")
+# Optional YYYY-MM-DD: when this account started hunting (shown as "Hunting N days").
+HUNT_SINCE = os.environ.get("HUNT_SINCE", "").strip()
+# Time zone for logs and Telegram (DST handled automatically).
+TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
+TZ = ZoneInfo(TIMEZONE)
 
 SSH_PUBLIC_KEY_PATH = os.environ["SSH_PUBLIC_KEY_PATH"]
 

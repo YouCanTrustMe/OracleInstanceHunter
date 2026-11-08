@@ -1,5 +1,10 @@
+import time
+
 import oci
 import config
+
+_image = {"id": None, "at": 0.0}
+IMAGE_CACHE_S = 24 * 3600
 
 
 def _read_ssh_public_key() -> str:
@@ -29,6 +34,16 @@ def _find_ubuntu_arm_image(compute: oci.core.ComputeClient) -> str:
     if not images:
         raise RuntimeError("No Ubuntu 22.04 image found for shape " + config.SHAPE)
     return images[0].id
+
+
+def _image_id(compute: oci.core.ComputeClient) -> str:
+    """Image to launch: IMAGE_ID, or the newest Ubuntu ARM image, looked up once a day
+    (not on every attempt — fewer API calls, fewer 429 TooManyRequests)."""
+    if config.IMAGE_ID:
+        return config.IMAGE_ID
+    if not _image["id"] or time.time() - _image["at"] > IMAGE_CACHE_S:
+        _image.update(id=_find_ubuntu_arm_image(compute), at=time.time())
+    return _image["id"]
 
 
 def running_instance_names() -> set[str]:
@@ -102,7 +117,7 @@ def launch_instance(instance_name: str = None, availability_domain: str = None) 
     network = oci.core.VirtualNetworkClient(oci_config)
 
     ssh_key = _read_ssh_public_key()
-    image_id = config.IMAGE_ID if config.IMAGE_ID else _find_ubuntu_arm_image(compute)
+    image_id = _image_id(compute)
 
     details = oci.core.models.LaunchInstanceDetails(
         availability_domain=availability_domain,
@@ -124,7 +139,12 @@ def launch_instance(instance_name: str = None, availability_domain: str = None) 
         metadata={"ssh_authorized_keys": ssh_key},
     )
 
-    response = compute.launch_instance(details)
+    try:
+        response = compute.launch_instance(details)
+    except oci.exceptions.ServiceError as e:
+        if e.status in (400, 404) and not config.IMAGE_ID and "image" in str(e.message).lower():
+            _image["id"] = None  # the cached image was withdrawn — look it up again next time
+        raise
     instance = response.data
 
     # Instance now exists — fetch its IP best-effort (never raises, so the caller

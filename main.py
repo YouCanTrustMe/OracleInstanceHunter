@@ -4,6 +4,9 @@ import logging
 import threading
 import signal
 import datetime
+import glob
+import os
+import re
 import requests
 import oci.exceptions
 
@@ -11,10 +14,12 @@ import config
 import oci_client
 import notifier
 import server_stats
+import status_board
 import watchdog
 
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M")
-_fmt.converter = lambda ts: time.gmtime(ts + 7200)  # UTC+2
+_TZ = config.TZ  # e.g. Europe/Kyiv: summer/winter time switches by itself
+_fmt.converter = lambda ts: datetime.datetime.fromtimestamp(ts, _TZ).timetuple()
 
 class _RedactSecrets(logging.Filter):
     """Mask the Telegram bot token (it appears inside request URLs in errors)."""
@@ -44,50 +49,78 @@ OUT_OF_CAPACITY_CODE = "InternalError"
 OUT_OF_CAPACITY_MSG = "Out of host capacity"
 
 _stop_event = threading.Event()
-_state: dict = {"attempt": 0, "start_time": 0.0}
-
-_TZ = datetime.timezone(datetime.timedelta(hours=2))
-
+_board: status_board.Board | None = None
 
 def _local_now() -> datetime.datetime:
     return datetime.datetime.now(_TZ)
 
 
-def _count_today_attempts() -> int:
+LOG_DIR = "logs"
+LOG_KEEP_DAYS = 30
+
+
+_DATED = re.compile(r"\d{4}-\d{2}-\d{2} ")
+
+
+def _rotate_log() -> None:
+    """Move every line dated before today out of hunter.log into logs/hunter_<date>.log
+    (appended; 30 days kept). Runs at start-up and after local midnight, so a restart
+    across midnight still files each line under its own day. Holds the file handler's
+    lock, so no thread can log between the read and the rewrite (nothing is lost)."""
     today = _local_now().date().isoformat()
     try:
-        with open("hunter.log", "r") as f:
-            lines = f.readlines()
-        return sum(1 for l in lines if l.startswith(today) and "Out of capacity. Retrying in" in l)
+        _fh.acquire()
+        try:
+            _fh.flush()
+            with open("hunter.log") as f:
+                lines = f.readlines()
+            past, keep, day = {}, [], None
+            for line in lines:
+                if _DATED.match(line):
+                    day = line[:10]
+                if day and day < today:  # undated lines (tracebacks) follow the line above
+                    past.setdefault(day, []).append(line)
+                else:
+                    keep.append(line)
+            if past:
+                os.makedirs(LOG_DIR, exist_ok=True)
+                for d, day_lines in past.items():
+                    with open(os.path.join(LOG_DIR, f"hunter_{d}.log"), "a") as f:
+                        f.writelines(day_lines)
+                with open("hunter.log", "w") as f:  # the handler appends (O_APPEND) after this
+                    f.writelines(keep)
+        finally:
+            _fh.release()
+        if past:
+            for old in sorted(glob.glob(os.path.join(LOG_DIR, "hunter_*.log")))[:-LOG_KEEP_DAYS]:
+                os.remove(old)
+            logger.info("=== Log rotated (%s archived) ===", ", ".join(sorted(past)))
     except FileNotFoundError:
-        return 0
-
-
-def _rotate_log(date: datetime.date, total_attempts: int) -> None:
-    date_str = date.isoformat()
-    try:
-        with open("hunter.log", "r") as f:
-            lines = f.readlines()
-        day_lines = [l for l in lines if l.startswith(date_str)]
-
-        capacity_errors = sum(1 for l in day_lines if "Out of capacity. Retrying in" in l)
-        oci_errors = sum(1 for l in day_lines if "OCI service error:" in l)
-        unexpected = sum(1 for l in day_lines if "Unexpected error:" in l)
-
-        summary = (
-            f"Daily summary {date_str}:\n"
-            f"Attempts: {total_attempts}\n"
-            f"Out of capacity: {capacity_errors}\n"
-            f"OCI errors: {oci_errors}\n"
-            f"Unexpected errors: {unexpected}"
-        )
-        notifier.send_message(summary, silent=True)
-
-        with open("hunter.log", "w"):
-            pass
-        logger.info("=== Log rotated for %s ===", date_str)
+        pass
     except Exception as e:
         logger.warning("Log rotation failed: %s", e)
+
+
+def _archived_days() -> list:
+    return sorted(os.path.basename(p)[7:17] for p in glob.glob(os.path.join(LOG_DIR, "hunter_*.log")))
+
+
+def _parse_day(arg: str) -> datetime.date | None:
+    """'2026-11-07', '07.11.2026' or '07.11' (the latest such day) → date; None if not a date."""
+    today = _local_now().date()
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+        try:
+            return datetime.datetime.strptime(arg, fmt).date()
+        except ValueError:
+            pass
+    for year in (today.year, today.year - 1):  # parse with the year, so 29.02 works in leap years
+        try:
+            d = datetime.datetime.strptime(f"{arg}.{year}", "%d.%m.%Y").date()
+        except ValueError:
+            continue
+        if d <= today:
+            return d
+    return None
 
 
 def _handle_signal(signum, frame) -> None:
@@ -185,31 +218,36 @@ def _send_log_tail() -> None:
         with open("hunter.log", "r") as f:
             lines = f.readlines()
         tail = "".join(lines[-LOG_LINES:]) or "Log is empty."
-        notifier.send_message(f"<pre>{tail}</pre>", silent=True)
+        notifier.send_message(f"<pre>{notifier.esc(tail)}</pre>", silent=True)
     except Exception as e:
-        notifier.send_message(f"Could not read log: {e}", silent=True)
+        notifier.send_message(f"Could not read log: {notifier.esc(e)}", silent=True)
 
 
-def _send_log_file() -> None:
+def _send_log_file(arg: str = "") -> None:
+    """/logfile → today's log; /logfile 07.11 → that day's archived log; /logfile list → days."""
     try:
-        today = _local_now().date().isoformat()
-        with open("hunter.log", "r") as f:
-            lines = f.readlines()
-        today_lines = [l for l in lines if l.startswith(today)]
-        content = "".join(today_lines) or "No entries for today."
-        url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendDocument"
-        requests.post(url, data={"chat_id": config.TELEGRAM_CHAT_ID, "disable_notification": True},
-                      files={"document": (f"hunter_{today}.log", content.encode())}, timeout=15)
+        today = _local_now().date()
+        if arg == "list":
+            days = _archived_days()
+            text = ("Archived logs (/logfile DD.MM):\n" + "\n".join(days[-LOG_KEEP_DAYS:])) if days else "No archived logs yet."
+            notifier.send_message(text, silent=True)
+            return
+        day = _parse_day(arg) if arg else today
+        if day is None:
+            notifier.send_message("Usage: /logfile, /logfile 07.11, /logfile list", silent=True)
+            return
+        if day == today:
+            _rotate_log()  # just after midnight hunter.log may still hold yesterday
+        path = "hunter.log" if day == today else os.path.join(LOG_DIR, f"hunter_{day.isoformat()}.log")
+        if not os.path.exists(path):
+            notifier.send_message(f"No log for {day:%d.%m.%Y}. /logfile list shows what's there.", silent=True)
+            return
+        with open(path, "rb") as f:
+            content = f.read() or b"Empty log."
+        if not notifier.send_document(f"hunter_{day.isoformat()}.log", content):
+            notifier.send_message("Could not send the log file (Telegram refused it, see /logs).", silent=True)
     except Exception as e:
-        notifier.send_message(f"Could not send log file: {e}", silent=True)
-
-
-def _format_status() -> str:
-    attempt = _state["attempt"]
-    elapsed = int(time.time() - _state["start_time"])
-    h, m = divmod(elapsed // 60, 60)
-    today = _local_now().date().isoformat()
-    return f"Attempt #{attempt} today ({today}), running for {h}h {m:02d}m"
+        notifier.send_message(f"Could not send log file: {notifier.esc(e)}", silent=True)
 
 
 def _bot_listener() -> None:
@@ -226,9 +264,12 @@ def _bot_listener() -> None:
                 if text.startswith("/logs"):
                     _send_log_tail()
                 elif text.startswith("/logfile"):
-                    _send_log_file()
+                    _send_log_file(text.split(maxsplit=1)[1].strip() if " " in text else "")
                 elif text.startswith("/status"):
-                    notifier.send_message(_format_status(), silent=True)
+                    if _board:
+                        notifier.send_message(_board.render(), silent=True)
+                    else:
+                        notifier.send_message("Starting up...", silent=True)
                 elif text.startswith("/load"):
                     notifier.send_message(f"<pre>{server_stats.format_report()}</pre>", silent=True)
         except Exception as e:
@@ -237,13 +278,19 @@ def _bot_listener() -> None:
 
 
 def run() -> None:
+    global _board
     target = config.TARGET_INSTANCES
     logger.info("=== OracleInstanceHunter started. Target: %d instance(s). Random delay: 121-147s ===", target)
     threading.Thread(target=_bot_listener, daemon=True).start()
     watchdog.start(_stop_event)
-    notifier.notify_started()
-
     slots = _slot_names()
+    ads_label = ",".join(_ad_short(ad) for ad in config.AVAILABILITY_DOMAINS)
+    _board = board = status_board.Board(slots, ads_label)
+    board.event("▶️ started")
+    board.refresh()
+    board.start_worker()  # from here on Telegram edits run off the hunting thread
+    _rotate_log()  # a restart across midnight must still archive yesterday
+
     # Must know what already exists before launching anything — otherwise a
     # listing failure at startup could re-create an existing slot (duplicate).
     have = _have_slots()
@@ -251,32 +298,27 @@ def run() -> None:
         _stop_event.wait(60)
         have = _have_slots()
     if have is None:
+        _finish(board, "stopped", "⏹ stopped")
         return
+    board.have = set(have)  # a copy: the board renders from other threads
+    board.poke()  # show the real slots now, not after the first attempt
     notified: set = set()
     if have:
         _announce_unnotified(have, notified)
     if len(have) >= target:
         logger.info("Already have %d/%d instance(s): %s. Nothing to do.", len(have), target, sorted(have))
+        _finish(board, "done", "🏁 all slots already filled")
         return
 
-    _state["attempt"] = _count_today_attempts()
-    _state["start_time"] = time.time()
-    last_heartbeat_hour = _local_now().hour
     last_day = _local_now().date()
     transient_streak = 0
-    ads_label = ",".join(_ad_short(ad) for ad in config.AVAILABILITY_DOMAINS)
 
     while not _stop_event.is_set() and len(have) < target:
         now = _local_now()
         if now.date() != last_day:
-            _rotate_log(last_day, _state["attempt"])
-            _state["attempt"] = 0
+            board.roll_day_if_new()
+            _rotate_log()
             last_day = now.date()
-        _state["attempt"] += 1
-        current_hour = now.hour
-        if current_hour != last_heartbeat_hour:
-            notifier.notify_heartbeat(_state["attempt"])
-            last_heartbeat_hour = current_hour
 
         next_name = next(n for n in slots if n not in have)
         prev_count = len(have)
@@ -285,37 +327,53 @@ def run() -> None:
             result = _launch_any_ad(next_name)
             transient_streak = 0
             have.add(result["name"])
+            board.have = have
             logger.info("Instance created: %s | IP: %s (%d/%d)", result["name"], result["public_ip"], len(have), target)
             _notify_success_safe(result)
             notified.add(result["name"])
+            board.event(f"🎉 created {result['name']} ({result['public_ip']})")
+            delay = random.randint(121, 147)
+            board.attempt("won", delay)
             if len(have) >= target:
                 logger.info("=== OracleInstanceHunter finished. All %d instance(s) ready ===", target)
-                break
+                _finish(board, "done", "🏁 all slots filled")
+                return
 
         except Exception as e:
             is_service = isinstance(e, oci.exceptions.ServiceError)
             if is_service and is_out_of_capacity(e):
                 if transient_streak >= TRANSIENT_ALERT_AFTER:
                     notifier.send_message("Connection to OCI restored, hunting normally.", silent=True)
+                    board.event("🔌 connection to OCI restored")
                 transient_streak = 0
                 delay = random.randint(121, 147)
                 logger.info("Out of capacity. Retrying in %d seconds... [%s]", delay, ads_label)
+                board.attempt("capacity", delay)
                 _stop_event.wait(delay)
                 continue
             # Any other error: re-check what actually exists — the attempt may
             # have created an instance, or the account cap may already be met.
             # Announce those and stop before spamming or creating duplicates.
             have = _have_slots(have)
+            board.have = have
             _announce_unnotified(have, notified)
+            delay = random.randint(121, 147)
             if len(have) >= target:
-                break
+                board.attempt("won")
+                _finish(board, "done", "🏁 all slots filled")
+                return
             if len(have) > prev_count:
                 logger.info("Instance created despite error; hunting remaining slot(s)")
+                board.event("🎉 instance created despite an error")
+                board.attempt("won", delay)
             elif _is_transient(e):
                 # Network blip / rate limit: retry quietly; alert only if it persists.
                 transient_streak += 1
+                short = f"{e.status} {e.code}" if is_service else type(e).__name__
                 logger.warning("Temporary error (%d in a row): %s", transient_streak,
                                f"{e.status} {e.code}" if is_service else e)
+                board.event(f"⏳ {short}, retried")
+                board.attempt("throttled" if is_service and e.status == 429 else "network", delay)
                 if transient_streak == TRANSIENT_ALERT_AFTER:
                     notifier.send_message(
                         f"Can't reach OCI for {transient_streak} attempts in a row (still retrying):\n<code>{e}</code>")
@@ -323,12 +381,20 @@ def run() -> None:
                 label = "OCI service error" if is_service else "Unexpected error"
                 logger.error("%s: %s", label, e)
                 notifier.send_message(f"{label}:\n<code>{e}</code>")
+                board.event(f"❌ {label}: {(e.code if is_service else type(e).__name__)}")
+                board.attempt("errors", delay)
 
-        delay = random.randint(121, 147)
         _stop_event.wait(delay)
 
     if _stop_event.is_set():
         logger.info("=== OracleInstanceHunter stopped by signal ===")
+        _finish(board, "stopped", "⏹ stopped")
+
+
+def _finish(board: status_board.Board, phase: str, note: str) -> None:
+    board.phase = phase
+    board.event(note)
+    board.refresh()
 
 
 if __name__ == "__main__":
