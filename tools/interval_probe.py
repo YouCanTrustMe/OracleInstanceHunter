@@ -79,7 +79,11 @@ def main() -> None:
                 except oci.exceptions.ServiceError as e:
                     kind = "capacity" if "Out of host capacity" in str(e.message) else f"{e.status} {e.code}"
                     stats[kind] += 1
-                    log(f"AD-{ad[-1]} {kind}")
+                    extra = ""
+                    if e.status == 429:
+                        retry_after = (e.headers or {}).get("retry-after")
+                        extra = f" (retry-after={retry_after})" if retry_after else ""
+                    log(f"AD-{ad[-1]} {kind}{extra} · step so far {dict(stats)}")
                     if kind != "capacity":
                         if slot in running_names(compute, compartment):  # dup-safety, like the hunter
                             log(f"WIN {slot} exists after an error — start the server hunter now")

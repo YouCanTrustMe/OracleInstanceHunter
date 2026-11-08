@@ -71,6 +71,9 @@ class Board:
         self.total_since = s.get("total_since") or self.day
         # [[unix_ts, text, count], ...] newest last; entries without a count get 1
         self.journal = [list(j[:2]) + [j[2] if len(j) > 2 else 1] for j in s.get("journal", [])]
+        # current self-tuning pause (main._next_delay), kept across restarts
+        self.pause = float(s.get("pause") or config.PAUSE_START_S)
+        self.pause = min(max(self.pause, config.PAUSE_MIN_S), config.PAUSE_MAX_S)
 
     # ---- state -----------------------------------------------------------------
     @staticmethod
@@ -86,7 +89,7 @@ class Board:
 
     def _save(self) -> None:
         state = {"msg_id": self.msg_id, "day": self.day, "today": self.today, "total": self.total,
-                 "total_since": self.total_since, "journal": self.journal}
+                 "total_since": self.total_since, "journal": self.journal, "pause": self.pause}
         try:
             tmp = STATE_FILE + ".tmp"
             with open(tmp, "w") as f:
@@ -187,7 +190,10 @@ class Board:
         ]
         if self.phase == "hunting" and self.last_try:
             nxt = f" · next ≈ {self.next_try:%H:%M}" if self.next_try else ""
-            lines.append(f"⏱ Last {self.last_try:%H:%M}{nxt} · AD {self.ads_label}")
+            lines.append(f"⏱ Last {self.last_try:%H:%M}{nxt} · {self.ads_label}")
+        if self.phase == "hunting":
+            share = f" · 429 today {100 * t['throttled'] / t['tries']:.0f}%" if t["tries"] else ""
+            lines.append(f"🎚 Pause {self.pause:.0f} s (auto){share}")
 
         try:
             mem = server_stats.memory()

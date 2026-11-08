@@ -14,8 +14,15 @@ OCI_KEY_FILE = os.environ["OCI_KEY_FILE"]
 COMPARTMENT_ID = os.environ["COMPARTMENT_ID"]
 SUBNET_ID = os.environ["SUBNET_ID"]
 IMAGE_ID = os.environ.get("IMAGE_ID", "")
-# One AD, or several comma-separated: each cycle tries them all in order.
+# One AD, or several comma-separated: attempts rotate through them, one AD per attempt.
 AVAILABILITY_DOMAINS = [ad.strip() for ad in os.environ["AVAILABILITY_DOMAIN"].split(",") if ad.strip()]
+
+# Self-tuning pause between attempts: every clean answer makes it a bit shorter,
+# every 429 TooManyRequests makes it clearly longer — so each account settles at
+# its own OCI limit (which differs per account and time of day). Bounds in seconds.
+PAUSE_START_S = int(os.environ.get("PAUSE_START_S", "60"))
+PAUSE_MIN_S = int(os.environ.get("PAUSE_MIN_S", "30"))
+PAUSE_MAX_S = int(os.environ.get("PAUSE_MAX_S", "300"))
 
 INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "arm-instance")
 TARGET_INSTANCES = int(os.environ.get("TARGET_INSTANCES", "1"))
