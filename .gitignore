@@ -13,3 +13,4 @@ venv/
 hunter_state.json
 hunter_state.json.tmp
 logs/
+.env.bak*

@@ -32,7 +32,7 @@ SHAPE = os.environ.get("SHAPE", "VM.Standard.A1.Flex")
 # Optional YYYY-MM-DD: when this account started hunting (shown as "Hunting N days").
 HUNT_SINCE = os.environ.get("HUNT_SINCE", "").strip()
 # Time zone for logs and Telegram (DST handled automatically).
-TIMEZONE = os.environ.get("TIMEZONE", "Europe/Kyiv")
+TIMEZONE = os.environ.get("TIMEZONE", "Europe/Berlin")
 TZ = ZoneInfo(TIMEZONE)
 
 SSH_PUBLIC_KEY_PATH = os.environ["SSH_PUBLIC_KEY_PATH"]

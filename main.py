@@ -18,7 +18,7 @@ import status_board
 import watchdog
 
 _fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M")
-_TZ = config.TZ  # e.g. Europe/Kyiv: summer/winter time switches by itself
+_TZ = config.TZ  # e.g. Europe/Berlin: summer/winter time switches by itself
 _fmt.converter = lambda ts: datetime.datetime.fromtimestamp(ts, _TZ).timetuple()
 
 class _RedactSecrets(logging.Filter):
