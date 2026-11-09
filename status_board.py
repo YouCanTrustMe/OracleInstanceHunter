@@ -12,6 +12,8 @@ import datetime
 import json
 import logging
 import os
+import socket
+import subprocess
 import threading
 import time
 
@@ -83,6 +85,23 @@ def _server_alert() -> str:
     return "🖥 " + " · ".join(parts)
 
 
+_version = None
+
+
+def _code_version() -> str:
+    """'384e813 · 09.11.2026' of the running checkout (read once, at start-up)."""
+    global _version
+    if _version is None:
+        try:
+            _version = subprocess.run(
+                ["git", "log", "-1", "--format=%h · %cd", "--date=format:%d.%m.%Y"],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                capture_output=True, text=True, timeout=5).stdout.strip() or "unknown"
+        except Exception:
+            _version = "unknown"
+    return _version
+
+
 def _zero_day() -> dict:
     # throttled = OCI 429 only; network = connection blips and OCI 5xx
     return {"tries": 0, "capacity": 0, "throttled": 0, "network": 0, "errors": 0}
@@ -120,6 +139,7 @@ class Board:
         self.hold = int(s.get("hold") or 0)
         self.below_edge = 0   # clean answers in a row below the edge
         self.prev_429 = False
+        _code_version()  # read now: a later `git pull` before the restart must not show up
 
     # ---- state -----------------------------------------------------------------
     @staticmethod
@@ -270,6 +290,47 @@ class Board:
                 rows.append(f"{tg_time(when, 't' if when.date() == now.date() else 'dt')} {notifier.esc(text)}{times}")
             lines += ["", "📝 <b>Journal</b>", "<blockquote expandable>" + "\n".join(rows) + "</blockquote>"]
         lines.append(f"<i>updated {tg_time(now)}</i>")
+        return "\n".join(lines)
+
+    def info(self) -> str:
+        """/info: everything that doesn't need to be on the pinned message."""
+        now = _now()
+        lines = [f"ℹ️ <b>Hunter info</b> · {config.OCI_REGION}",
+                 f"🎯 {len(self.slots)} × {config.SHAPE.replace('VM.Standard.', '')} · "
+                 f"{config.OCPUS:g} OCPU · {config.MEMORY_GB:g} GB each",
+                 "  ".join(("✅ " if n in self.have else "⬜️ ") + n for n in self.slots)]
+        if config.HUNT_SINCE:
+            try:
+                since = datetime.date.fromisoformat(config.HUNT_SINCE)
+                lines.append(f"🗓 Hunting <b>{(now.date() - since).days} days</b> · since {since:%d.%m.%Y}")
+            except ValueError:
+                pass
+        lines.append(f"Σ <b>{_num(self.total)}</b> tries since {self._since()}")
+
+        lines += ["", f"🎚 <b>Pause</b> {self.pause:.0f} s · range {config.PAUSE_MIN_S}–{config.PAUSE_MAX_S} s"]
+        if self.edge:
+            last = ""
+            if self.last_429:
+                last = f" · last 429 {tg_time(datetime.datetime.fromtimestamp(self.last_429, TZ))}"
+            lines.append(f"      OCI limit ≈ {self.edge:.0f} s{last}")
+            if self.hold:
+                lines.append(f"      holding {self.hold} more tries before going lower")
+        else:
+            lines.append("      OCI limit not hit yet")
+
+        try:
+            mem = server_stats.memory()
+            dsk = server_stats.disk("/")
+            l1, l5, l15 = server_stats.load_avg()
+            lines += ["", f"🖥 <b>Server</b> {notifier.esc(socket.gethostname())}",
+                      f"      CPU {server_stats.cpu_percent(0.5):.0f}% · load {l1} {l5} {l15}",
+                      f"      RAM {mem['percent']:.0f}% ({_size(mem['used_mb'])} of {_size(mem['total_mb'])})"
+                      + (f" · swap {_size(mem['swap_used_mb'])}" if mem["swap_total_mb"] else ""),
+                      f"      disk {dsk['percent']:.0f}% ({dsk['used_gb']:g} of {dsk['total_gb']:g} GB)"
+                      f" · up {server_stats.uptime_str()}"]
+        except Exception:
+            pass
+        lines.append(f"🔖 Code {_code_version()}")
         return "\n".join(lines)
 
     # ---- telegram --------------------------------------------------------------

@@ -41,11 +41,12 @@ def send_email(subject: str, body: str, attachments: list = None) -> None:
             pass
 
 
-def _api(method: str, files: dict = None, **payload) -> dict | None:
+def _api(method: str, files: dict = None, to_chat: bool = True, **payload) -> dict | None:
     """Call the Telegram Bot API (multipart when `files` is given). Never raises;
     returns the decoded reply or None if Telegram couldn't be reached."""
     url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/{method}"
-    payload = {"chat_id": config.TELEGRAM_CHAT_ID, **payload}
+    if to_chat:
+        payload = {"chat_id": config.TELEGRAM_CHAT_ID, **payload}
     try:
         if files:
             reply = requests.post(url, data=payload, files=files, timeout=30).json()
@@ -81,12 +82,21 @@ def edit_message(message_id: int, text: str) -> str:
     return "gone" if ("not found" in desc or "can't be edited" in desc) else "refused"
 
 
-def send_document(filename: str, content: bytes, caption: str = None, silent: bool = True) -> bool:
+def send_document(filename: str, content: bytes, caption: str = None, silent: bool = True,
+                  html_caption: bool = False) -> bool:
     """Upload a file to the chat. Never raises; False (and a log line) if it didn't arrive."""
     extra = {"caption": caption} if caption else {}
+    if caption and html_caption:
+        extra["parse_mode"] = "HTML"
     reply = _api("sendDocument", files={"document": (filename, content)},
                  disable_notification=silent, **extra)
     return bool(reply and reply.get("ok"))
+
+
+def set_commands(commands: list) -> None:
+    """The bot's "/" menu, from the code, so every bot shows the same current list."""
+    _api("setMyCommands", to_chat=False,
+         commands=[{"command": c, "description": d} for c, d in commands])
 
 
 def pin_message(message_id: int) -> None:
@@ -157,4 +167,4 @@ def _send_ssh_keys(public_ip: str) -> None:
             send_message(f"Could not send SSH key {filename}: {esc(e)}", silent=True)
             continue
         if not send_document(filename, content, caption=f"SSH key: {filename}\nIP: {public_ip}", silent=False):
-            send_message(f"Could not send SSH key {filename} (see /logs)", silent=True)
+            send_message(f"Could not send SSH key {filename} (see /log)", silent=True)

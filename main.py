@@ -13,7 +13,6 @@ import oci.exceptions
 import config
 import oci_client
 import notifier
-import server_stats
 import status_board
 import watchdog
 
@@ -236,47 +235,66 @@ def _announce_unnotified(have: set, notified: set) -> None:
         notified.add(name)
 
 
-LOG_LINES = 10
+CAPTION_MAX = 1000  # Telegram caption limit is 1024 characters
 
 
-def _send_log_tail() -> None:
-    try:
-        with open("hunter.log", "r") as f:
-            lines = f.readlines()
-        tail = "".join(lines[-LOG_LINES:]) or "Log is empty."
-        notifier.send_message(f"<pre>{notifier.esc(tail)}</pre>", silent=True)
-    except Exception as e:
-        notifier.send_message(f"Could not read log: {notifier.esc(e)}", silent=True)
+def _log_caption(content: bytes) -> str:
+    """Last lines of the log that fit into a file caption."""
+    tail = ""
+    for line in reversed(content.decode("utf-8", "replace").splitlines()):
+        if len(tail) + len(line) + 1 > CAPTION_MAX:
+            break
+        tail = line + "\n" + tail
+    return f"<pre>{notifier.esc(tail.rstrip())}</pre>" if tail.strip() else ""
 
 
-def _send_log_file(arg: str = "") -> None:
-    """/logfile → today's log; /logfile 07.11 → that day's archived log; /logfile list → days."""
+def _send_log(arg: str = "") -> None:
+    """/log → today's log file, its last lines as the caption; /log 07.11 → that
+    day's archived log; /log list → which days exist."""
     try:
         today = _local_now().date()
         if arg == "list":
             days = _archived_days()
-            text = ("Archived logs (/logfile DD.MM):\n" + "\n".join(days[-LOG_KEEP_DAYS:])) if days else "No archived logs yet."
+            text = ("Archived logs (/log DD.MM):\n" + "\n".join(days[-LOG_KEEP_DAYS:])) if days else "No archived logs yet."
             notifier.send_message(text, silent=True)
             return
         day = _parse_day(arg) if arg else today
         if day is None:
-            notifier.send_message("Usage: /logfile, /logfile 07.11, /logfile list", silent=True)
+            notifier.send_message("Usage: /log, /log 07.11, /log list", silent=True)
             return
         if day == today:
             _rotate_log()  # just after midnight hunter.log may still hold yesterday
         path = "hunter.log" if day == today else os.path.join(LOG_DIR, f"hunter_{day.isoformat()}.log")
         if not os.path.exists(path):
-            notifier.send_message(f"No log for {day:%d.%m.%Y}. /logfile list shows what's there.", silent=True)
+            notifier.send_message(f"No log for {day:%d.%m.%Y}. /log list shows what's there.", silent=True)
             return
         with open(path, "rb") as f:
             content = f.read() or b"Empty log."
-        if not notifier.send_document(f"hunter_{day.isoformat()}.log", content):
-            notifier.send_message("Could not send the log file (Telegram refused it, see /logs).", silent=True)
+        if not notifier.send_document(f"hunter_{day.isoformat()}.log", content,
+                                      caption=_log_caption(content) or None, html_caption=True):
+            notifier.send_message("Could not send the log file (Telegram refused it).", silent=True)
     except Exception as e:
         notifier.send_message(f"Could not send log file: {notifier.esc(e)}", silent=True)
 
 
+COMMANDS = [("info", "Totals, pause and OCI limit, server, code version"),
+            ("log", "Today's log file (/log 07.11 for a day, /log list)")]
+
+
+def _handle_command(text: str) -> None:
+    parts = text.split(maxsplit=1)
+    cmd = parts[0].split("@")[0].lower()  # "/log@SomeBot" in groups
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if cmd == "/log":
+        _send_log(arg)
+    elif cmd == "/info":
+        notifier.send_message(_board.info() if _board else "Starting up...", silent=True)
+    else:
+        notifier.send_message("Commands: /info · /log (today) · /log 07.11 · /log list", silent=True)
+
+
 def _bot_listener() -> None:
+    notifier.set_commands(COMMANDS)
     url_base = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
     offset = 0
     while not _stop_event.is_set():
@@ -286,18 +304,12 @@ def _bot_listener() -> None:
             for update in updates:
                 offset = update["update_id"] + 1
                 msg = update.get("message", {})
+                # Only our chat: anyone can find a bot and send it commands.
+                if str(msg.get("chat", {}).get("id")) != str(config.TELEGRAM_CHAT_ID):
+                    continue
                 text = msg.get("text", "")
-                if text.startswith("/logs"):
-                    _send_log_tail()
-                elif text.startswith("/logfile"):
-                    _send_log_file(text.split(maxsplit=1)[1].strip() if " " in text else "")
-                elif text.startswith("/status"):
-                    if _board:
-                        notifier.send_message(_board.render(), silent=True)
-                    else:
-                        notifier.send_message("Starting up...", silent=True)
-                elif text.startswith("/load"):
-                    notifier.send_message(f"<pre>{server_stats.format_report()}</pre>", silent=True)
+                if text.startswith("/"):
+                    _handle_command(text)
         except Exception as e:
             logger.warning("Bot listener error: %s", e)
             time.sleep(5)
