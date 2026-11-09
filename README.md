@@ -5,12 +5,13 @@ Hunts for Oracle Cloud **Always Free ARM** capacity. It keeps trying to create a
 ## Features
 
 - **Polling with jitter**: self-tuning pause that remembers where OCI last answered 429 and stays just above it (bounded 15–300 s), so each account runs at its own OCI rate limit; ADs rotate one per attempt, silent retry on "Out of host capacity"
+- **Scout**: asks OCI's compute capacity report every 2 s (`SCOUT_INTERVAL_S`, own rate limit, separate from launches) and launches at once when it says AVAILABLE; normal launches go on as before. `/info` counts how often it saw capacity, won, or was wrong
 - **Multiple availability domains**: give a comma-separated list and attempts rotate through them, one AD per attempt
 - **Multiple instances**: `TARGET_INSTANCES=2` hunts `arm-instance` + `arm-instance-2` (e.g. two 1 OCPU / 6 GB boxes), resumes correctly after a restart
 - **Duplicate-safe**: never retries once a VM was created; re-checks existing instances after any error
 - **Win notification**: Telegram message with name, public IP, SSH command, plus the SSH key files; optional email with the keys attached (works even if you mute the Telegram chat)
 - **Resilient**: Telegram/SMTP outages never crash the hunter; short network blips are retried quietly (alert only after 5 in a row)
-- **Telegram bot commands** (menu set by the bot itself, only your chat is answered): `/info` (totals, pause and OCI limit, server load, code version), `/log` (today's log file with the last lines as caption; `/log 07.11` for an earlier day, `/log list`)
+- **Telegram bot commands** (menu set by the bot itself, only your chat is answered): `/info` (totals, pause and OCI limit, scout stats, server load, code version), `/log` (today's log file with the last lines as caption; `/log 07.11` for an earlier day, `/log list`)
 - **Housekeeping**: one pinned status message edited in place (no hourly spam), silent daily summary, logs archived per day for 30 days, times in `TIMEZONE` (default Europe/Berlin, DST-aware), graceful shutdown on SIGTERM, bot token masked in logs
 
 > Since 2026-06-15 the Always Free A1 allowance is **2 OCPU / 12 GB per account** (was 4 / 24).
@@ -104,6 +105,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ├── config.py               # Loads all config from .env
 ├── oci_client.py           # OCI API: launch instance, detect image, get public IP
 ├── notifier.py             # Telegram notifications (silent/loud)
+├── scout.py                # Capacity report poller: wakes the hunter on AVAILABLE
 ├── status_board.py         # Pinned live status message, /info text, daily summary
 ├── server_stats.py         # Server load snapshot (/info command)
 ├── watchdog.py             # Peer watchdog: alert if the other server stops responding

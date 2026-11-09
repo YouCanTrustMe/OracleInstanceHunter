@@ -93,10 +93,12 @@ def send_document(filename: str, content: bytes, caption: str = None, silent: bo
     return bool(reply and reply.get("ok"))
 
 
-def set_commands(commands: list) -> None:
-    """The bot's "/" menu, from the code, so every bot shows the same current list."""
-    _api("setMyCommands", to_chat=False,
-         commands=[{"command": c, "description": d} for c, d in commands])
+def set_commands(commands: list) -> bool:
+    """The bot's "/" menu, from the code, so every bot shows the same current list.
+    Never raises; True once Telegram took it."""
+    reply = _api("setMyCommands", to_chat=False,
+                 commands=[{"command": c, "description": d} for c, d in commands])
+    return bool(reply and reply.get("ok"))
 
 
 def pin_message(message_id: int) -> None:

@@ -24,7 +24,11 @@ PAUSE_START_S = int(os.environ.get("PAUSE_START_S", "60"))
 PAUSE_MIN_S = int(os.environ.get("PAUSE_MIN_S", "15"))
 PAUSE_MAX_S = int(os.environ.get("PAUSE_MAX_S", "300"))
 
-INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "arm-instance")
+# Scout (scout.py): how often to ask OCI's capacity report "is there room?" (one AD
+# per check, in turn). On "yes" the hunter launches at once. 0 turns the scout off.
+SCOUT_INTERVAL_S = float(os.environ.get("SCOUT_INTERVAL_S", "2"))
+
+INSTANCE_NAME =os.environ.get("INSTANCE_NAME", "arm-instance")
 TARGET_INSTANCES = int(os.environ.get("TARGET_INSTANCES", "1"))
 OCPUS = float(os.environ.get("OCPUS", "4"))
 MEMORY_GB = float(os.environ.get("MEMORY_GB", "24"))

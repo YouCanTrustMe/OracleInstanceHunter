@@ -85,6 +85,30 @@ def find_existing_instance(instance_name: str = None) -> dict | None:
     return None
 
 
+_report_client = None
+
+
+def capacity_status(availability_domain: str) -> str:
+    """Compute capacity report for our shape and size in one AD: "AVAILABLE",
+    "OUT_OF_HOST_CAPACITY", ... Read-only and on its own (generous) rate limit, not
+    LaunchInstance's. One client, reused (built once: called every few seconds);
+    no SDK retry, so a 429 reaches the scout and slows it down."""
+    global _report_client
+    if _report_client is None:
+        _report_client = oci.core.ComputeClient(
+            _build_oci_config(), retry_strategy=oci.retry.NoneRetryStrategy(), timeout=(10, 25))
+    m = oci.core.models
+    details = m.CreateComputeCapacityReportDetails(
+        compartment_id=config.OCI_TENANCY,  # the report wants the root compartment
+        availability_domain=availability_domain,
+        shape_availabilities=[m.CreateCapacityReportShapeAvailabilityDetails(
+            instance_shape=config.SHAPE,
+            instance_shape_config=m.CapacityReportInstanceShapeConfig(
+                ocpus=config.OCPUS, memory_in_gbs=config.MEMORY_GB))])
+    report = _report_client.create_compute_capacity_report(details).data
+    return report.shape_availabilities[0].availability_status
+
+
 def _wait_for_public_ip(compute, network, instance_id) -> str | None:
     """Best-effort: wait for RUNNING and fetch the public IP. Never raises — the
     instance is already created, so a failure here must not bubble up and make

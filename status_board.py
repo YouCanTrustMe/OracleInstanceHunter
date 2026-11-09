@@ -103,8 +103,16 @@ def _code_version() -> str:
 
 
 def _zero_day() -> dict:
-    # throttled = OCI 429 only; network = connection blips and OCI 5xx
-    return {"tries": 0, "capacity": 0, "throttled": 0, "network": 0, "errors": 0}
+    # throttled = OCI 429 only; network = connection blips and OCI 5xx;
+    # checks / seen = scout capacity reports / capacity windows it saw
+    return {"tries": 0, "capacity": 0, "throttled": 0, "network": 0, "errors": 0,
+            "checks": 0, "seen": 0}
+
+
+def _zero_scout() -> dict:
+    # since the scout started: capacity windows seen, scout shots that won, scout
+    # shots answered "out of capacity", wins by a normal launch with no scout "yes"
+    return {"seen": 0, "won": 0, "false": 0, "missed": 0}
 
 
 class Board:
@@ -137,8 +145,11 @@ class Board:
         self.pause = min(max(self.pause, config.PAUSE_MIN_S), config.PAUSE_MAX_S)
         self.edge: float | None = s.get("edge")
         self.hold = int(s.get("hold") or 0)
-        self.below_edge = 0   # clean answers in a row below the edge
-        self.prev_429 = False
+        self.below_edge = int(s.get("below_edge") or 0)  # clean answers in a row below the edge
+        self.prev_429 = bool(s.get("prev_429"))         # the last answer was a 429
+        self.scout_interval: float | None = None  # set by main when the scout runs
+        self.scout_health = lambda: ""            # main: the scout's error, if it fails
+        self.scout = {**_zero_scout(), **s.get("scout", {})}
         _code_version()  # read now: a later `git pull` before the restart must not show up
 
     # ---- state -----------------------------------------------------------------
@@ -160,7 +171,9 @@ class Board:
     def _save(self) -> None:
         state = {"msg_id": self.msg_id, "day": self.day, "today": self.today, "total": self.total,
                  "total_since": self.total_since, "journal": self.journal, "pause": self.pause,
-                 "edge": self.edge, "hold": self.hold, "last_429": self.last_429}
+                 "edge": self.edge, "hold": self.hold, "last_429": self.last_429,
+                 "below_edge": self.below_edge, "prev_429": self.prev_429,
+                 "scout": self.scout}
         try:
             tmp = STATE_FILE + ".tmp"
             with open(tmp, "w") as f:
@@ -212,6 +225,20 @@ class Board:
             self._save()
         self.poke()
 
+    def scout_checked(self) -> None:
+        """One capacity report answered (scout thread, every few seconds: no file write)."""
+        self.roll_day_if_new()  # after midnight the checks belong to the new day
+        with self._lock:
+            self.today["checks"] += 1
+
+    def scout_note(self, key: str) -> None:
+        """seen | won | false | missed (see _zero_scout)."""
+        with self._lock:
+            self.scout[key] += 1
+            if key == "seen":
+                self.today["seen"] += 1
+            self._save()
+
     def start_worker(self) -> None:
         """Refresh Telegram from a background thread, so a slow Telegram never
         stretches the pause between attempts. Pokes coalesce: many → one edit."""
@@ -250,6 +277,8 @@ class Board:
         lines.append(f"⚠️ {problems} · see /log" if problems else "✅ No errors")
         if self.edge:
             lines.append(f"🎚 OCI limit ≈ {self.edge:.0f} s")
+        if t["checks"]:
+            lines.append(f"🔭 Scout <b>{_num(t['checks'])}</b> checks · capacity seen <b>{t['seen']}×</b>")
         notifier.send_message("\n".join(lines), silent=True)
 
     # ---- rendering -------------------------------------------------------------
@@ -317,6 +346,17 @@ class Board:
                 lines.append(f"      holding {self.hold} more tries before going lower")
         else:
             lines.append("      OCI limit not hit yet")
+
+        if self.scout_interval:
+            sc = self.scout
+            lines += ["", f"🔭 <b>Scout</b> every {self.scout_interval:g} s · "
+                          f"<b>{_num(self.today['checks'])}</b> checks today",
+                      f"      capacity seen <b>{sc['seen']}×</b> · launch won {sc['won']} · "
+                      f"false alarm {sc['false']}",
+                      f"      wins without a scout signal: {sc['missed']}"]
+            health = self.scout_health()
+            if health:
+                lines.append(f"      ⚠️ {notifier.esc(health)}")
 
         try:
             mem = server_stats.memory()

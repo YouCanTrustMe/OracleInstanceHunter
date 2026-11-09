@@ -13,6 +13,7 @@ import oci.exceptions
 import config
 import oci_client
 import notifier
+import scout
 import status_board
 import watchdog
 
@@ -220,6 +221,19 @@ def _next_delay(board: status_board.Board, verdict: str) -> int:
     return int(board.pause) + random.randint(0, 5)
 
 
+def _wait_for_turn(deadline: float, sc: "scout.Scout | None") -> None:
+    """Sleep until `deadline` (unix time), a scout "yes" or a stop signal."""
+    while not _stop_event.is_set():
+        left = deadline - time.time()
+        if left <= 0:
+            return
+        if sc is None:
+            _stop_event.wait(left)
+        elif sc.wake.wait(min(left, 1)):  # 1 s steps: a stop signal still gets through
+            sc.wake.clear()
+            return
+
+
 def _announce_unnotified(have: set, notified: set) -> None:
     """Send a Telegram notice + SSH keys for any filled slot not yet announced
     (covers instances a failed attempt created but never reported)."""
@@ -294,11 +308,13 @@ def _handle_command(text: str) -> None:
 
 
 def _bot_listener() -> None:
-    notifier.set_commands(COMMANDS)
     url_base = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}"
     offset = 0
+    menu_set = False
     while not _stop_event.is_set():
         try:
+            if not menu_set:  # retried until Telegram takes it (a blip at start-up)
+                menu_set = notifier.set_commands(COMMANDS)
             resp = requests.get(f"{url_base}/getUpdates", params={"offset": offset, "timeout": 30}, timeout=35)
             updates = resp.json().get("result", [])
             for update in updates:
@@ -349,12 +365,48 @@ def run() -> None:
         _finish(board, "done", "🏁 all slots already filled")
         return
 
+    sc = None
+    if config.SCOUT_INTERVAL_S > 0:
+        sc = scout.Scout(ads, config.SCOUT_INTERVAL_S, on_check=board.scout_checked,
+                         on_seen=lambda: board.scout_note("seen"))
+        board.scout_interval = config.SCOUT_INTERVAL_S
+        board.scout_health = sc.health
+        threading.Thread(target=sc.run, args=(_stop_event,), daemon=True, name="scout").start()
+
     # A restart usually comes right after an attempt; going again at once got a 429
     # on Zurich after every deploy. Wait the remembered pause first.
     first_wait = int(board.pause)
+    next_regular = time.time() + first_wait  # the normal launch rhythm
     board.next_try = _local_now() + datetime.timedelta(seconds=first_wait)
     board.poke()
-    _stop_event.wait(first_wait)
+
+    def calm() -> None:
+        """OCI answered (anything but a network/5xx failure): the outage streak is over."""
+        nonlocal transient_streak
+        if transient_streak >= TRANSIENT_ALERT_AFTER:
+            notifier.send_message("Connection to OCI restored, hunting normally.", silent=True)
+        board.outage_over()  # also an outage line left open by a restart
+        transient_streak = 0
+
+    def plan(verdict: str, shot: bool) -> int:
+        """Seconds until the next normal launch, after this one. A scout shot fires off
+        the rhythm, so it never teaches the pause ("keep")."""
+        nonlocal next_regular
+        if shot:
+            # When may the scout fire again? OCI seems to count rejected calls too, so a
+            # shot soon after any call that reached it (a 429 included) would only keep its
+            # limit shut: wait the pause, like the normal rhythm. A network blip (the call
+            # may never have arrived): 10 s. A real error would only repeat: 5 min.
+            sc.mute({"slow": scout.ERROR_MUTE_S, "keep": scout.RETRY_NET_S}.get(verdict, board.pause))
+        if shot and verdict == "429":
+            # OCI's limit is closed right now: the normal launch must not follow at once
+            # (it would get a 429 too and teach the pause an edge the shot caused).
+            next_regular = max(next_regular, time.time() + board.pause)
+            return max(1, int(next_regular - time.time()))
+        delay = _next_delay(board, "keep" if shot else verdict)
+        now_ts = time.time()
+        next_regular = max(next_regular, now_ts + delay) if shot else now_ts + delay
+        return max(1, int(next_regular - now_ts))
 
     last_day = _local_now().date()
     transient_streak = 0
@@ -362,29 +414,44 @@ def run() -> None:
     ad_turn = 0  # one AD per attempt, round-robin: 1 call/attempt keeps us under the 429 limit
 
     while not _stop_event.is_set() and len(have) < target:
+        _wait_for_turn(next_regular, sc)
+        if _stop_event.is_set():
+            break
+        scout_ad = sc.take() if sc else None
+        if not scout_ad and time.time() < next_regular:
+            continue  # a stale wake-up (muted or already gone)
+        shot = scout_ad is not None
         now = _local_now()
-        if now.date() != last_day:  # the day summary itself is sent by board.attempt()
+        if now.date() != last_day:  # the day summary is sent by the board (attempt / scout check)
             _rotate_log()
             last_day = now.date()
 
         next_name = next(n for n in slots if n not in have)
         prev_count = len(have)
 
-        ad = ads[ad_turn % len(ads)]
-        ad_turn += 1
-        ad_label = f"AD-{_ad_short(ad)}" + (f" of {len(ads)}" if len(ads) > 1 else "")
-        board.ads_label = ad_label
+        if shot:
+            ad = scout_ad
+            ad_label = f"AD-{_ad_short(ad)}, scout"
+            logger.info("Scout saw capacity in AD-%s, launching now", _ad_short(ad))
+            board.event(f"🔭 capacity seen in AD-{_ad_short(ad)}, launching")
+        else:
+            ad = ads[ad_turn % len(ads)]
+            ad_turn += 1
+            ad_label = f"AD-{_ad_short(ad)}" + (f" of {len(ads)}" if len(ads) > 1 else "")
+            board.ads_label = ad_label
 
         try:
             result = oci_client.launch_instance(next_name, ad)
-            transient_streak = 0
+            calm()
             have.add(result["name"])
             board.have = set(have)  # a copy: the board renders from other threads
             logger.info("Instance created: %s | IP: %s (%d/%d)", result["name"], result["public_ip"], len(have), target)
             _notify_success_safe(result)
             notified.add(result["name"])
             board.event(f"🎉 created {result['name']} ({result['public_ip']})")
-            delay = _next_delay(board, "ok")
+            if sc:
+                board.scout_note("won" if shot else "missed")
+            delay = plan("ok", shot)
             board.attempt("won", delay)
             if len(have) >= target:
                 logger.info("=== OracleInstanceHunter finished. All %d instance(s) ready ===", target)
@@ -394,14 +461,17 @@ def run() -> None:
         except Exception as e:
             is_service = isinstance(e, oci.exceptions.ServiceError)
             if is_service and is_out_of_capacity(e):
-                if transient_streak >= TRANSIENT_ALERT_AFTER:
-                    notifier.send_message("Connection to OCI restored, hunting normally.", silent=True)
-                    board.outage_over()
-                transient_streak = 0
-                delay = _next_delay(board, "ok")
-                logger.info("Out of capacity. Retrying in %d seconds... [%s]", delay, ad_label)
+                calm()
+                delay = plan("ok", shot)
+                if shot:
+                    sc.false_alarm(ad)
+                    board.scout_note("false")
+                    board.event(f"🔭 false alarm in AD-{_ad_short(ad)}")
+                    logger.info("Scout false alarm: launch said out of capacity [%s]; that AD's "
+                                "\"yes\" ignored until the report says no", ad_label)
+                else:
+                    logger.info("Out of capacity. Retrying in %d seconds... [%s]", delay, ad_label)
                 board.attempt("capacity", delay)
-                _stop_event.wait(delay)
                 continue
             # Any other error: re-check what actually exists — the attempt may
             # have created an instance, or the account cap may already be met.
@@ -416,14 +486,16 @@ def run() -> None:
                 have = _have_slots(have)
                 board.have = set(have)
                 _announce_unnotified(have, notified)
-            delay = _next_delay(board, "429" if rate_limited else "keep" if _is_transient(e) else "slow")
+            delay = plan("429" if rate_limited else "keep" if _is_transient(e) else "slow", shot)
+            if sc and len(have) > prev_count:
+                board.scout_note("won" if shot else "missed")
             if len(have) >= target:
                 board.attempt("won")
                 _finish(board, "done", "🏁 all slots filled")
                 return
             if len(have) > prev_count:
                 logger.info("Instance created despite error; hunting remaining slot(s)")
-                transient_streak = 0
+                calm()
                 board.event("🎉 instance created despite an error")
                 board.attempt("won", delay)
             elif _is_transient(e):
@@ -431,7 +503,10 @@ def run() -> None:
                 # pause working as meant (OCI is reachable), so only network/5xx
                 # failures build the "can't reach OCI" streak that alerts.
                 short = f"{e.status} {e.code}" if is_service else type(e).__name__
-                if rate_limited:
+                if rate_limited and shot:
+                    logger.warning("Rate limited: %s on the scout shot, next try in %d s",
+                                   short, board.pause)
+                elif rate_limited:
                     logger.warning("Rate limited: %s (pause now %d s)", short, board.pause)
                 else:
                     transient_streak += 1
@@ -448,13 +523,11 @@ def run() -> None:
                         f"<code>{notifier.esc(e)}</code>")
             else:
                 label = "OCI service error" if is_service else "Unexpected error"
-                transient_streak = 0  # "in a row" means in a row
+                calm()  # "in a row" means in a row
                 logger.error("%s: %s", label, e)
                 notifier.send_message(f"{label}:\n<code>{notifier.esc(e)}</code>")
                 board.event(f"❌ {label}: {(e.code if is_service else type(e).__name__)}")
                 board.attempt("errors", delay)
-
-        _stop_event.wait(delay)
 
     if _stop_event.is_set():
         logger.info("=== OracleInstanceHunter stopped by signal ===")

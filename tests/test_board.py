@@ -106,6 +106,13 @@ class Journal(unittest.TestCase):
         b.outage_over()
         self.assertRegex(b.journal[-1][1], r"^📡 OCI unreachable 09:31–\d\d:\d\d$")
 
+    def test_pause_memory_survives_a_restart(self):
+        b = board()
+        b.prev_429, b.below_edge = True, 3
+        b.save()
+        again = Board(["arm", "arm-2"], "AD-1")
+        self.assertEqual((again.prev_429, again.below_edge), (True, 3))
+
     def test_old_429_lines_and_2_element_entries_load_cleanly(self):
         _setup.fresh_state()
         b = Board(["arm", "arm-2"], "AD-1")
@@ -141,12 +148,25 @@ class Info(unittest.TestCase):
     def test_info_before_any_429(self):
         self.assertIn("OCI limit not hit yet", board().info())
 
+    def test_info_scout_section_only_when_it_runs(self):
+        b = board()
+        self.assertNotIn("Scout", b.info())
+        b.scout_interval = 2
+        b.scout_checked()
+        b.scout_note("seen")
+        b.scout_note("false")
+        text = b.info()
+        for part in ("🔭 <b>Scout</b> every 2 s · <b>1</b> checks today",
+                     "capacity seen <b>1×</b> · launch won 0 · false alarm 1",
+                     "wins without a scout signal: 0"):
+            self.assertIn(part, text)
+
 
 class DaySummary(unittest.TestCase):
     def test_summary_after_midnight(self):
         b = board()
         b.day = "2026-11-08"
-        b.today.update(tries=640, capacity=620, throttled=15, network=5)
+        b.today.update(tries=640, capacity=620, throttled=15, network=5, checks=43200, seen=1)
         b.edge = 86.0
         b.roll_day_if_new()
         text = _setup.sent[-1][1]["text"]
@@ -155,6 +175,7 @@ class DaySummary(unittest.TestCase):
             "🚦 Throttled (429) <b>15</b> · 2%",
             "⚠️ Network <b>5</b> · see /log",
             "🎚 OCI limit ≈ 86 s",
+            "🔭 Scout <b>43 200</b> checks · capacity seen <b>1×</b>",
         ])
         self.assertEqual(b.today["tries"], 0)
 
