@@ -179,19 +179,45 @@ def _ad_short(ad: str) -> str:
     return ad.rsplit("-", 1)[-1] if "-AD-" in ad.upper() else ad
 
 
-PAUSE_FASTER_S = 3     # each clean answer: next pause 3 s shorter
-PAUSE_SLOWER_X = 1.5   # each 429: next pause 1.5x longer
+# Self-tuning pause with a memory of OCI's limit ("edge" = the pause that last got a 429).
+# OCI lets roughly one launch call through per N seconds and turns the rest away, so the
+# best place is just above the edge. Simulated on the real Zurich log: ~39 accepted
+# checks/h vs ~32 with the old "-3 s / x1.5" rule (ceiling ~42), and fewer 429s.
+PAUSE_FAST_STEP_S = 3     # clean answer far above the edge (or no edge known): 3 s shorter
+PAUSE_NEAR_STEP_S = 0.5   # clean answer close to the edge: creep down slowly
+PAUSE_NEAR_ZONE = 1.2     # "close" = less than 20% above the edge
+PAUSE_BACKOFF = 1.05      # after a 429: 5% above the pause that got it ...
+PAUSE_HOLD_TRIES = 20     # ... and stay there for 20 clean answers before creeping down
+PAUSE_REPEAT_X = 1.5      # 429 twice in a row: OCI got stricter, back off hard
+PAUSE_EDGE_STALE = 5      # 5 clean answers below the edge: the limit moved, go fast again
 
 
 def _next_delay(board: status_board.Board, verdict: str) -> int:
-    """Self-tuning pause. verdict: "ok" (OCI answered normally) -> a bit faster,
-    "slow" (429, or a real error that would otherwise alert every ~30 s) -> clearly
-    slower, "keep" (network blip / 5xx: says nothing about our rate) -> unchanged.
-    +0-5 s jitter."""
+    """Next pause in seconds (+0-5 s jitter). verdict: "ok" (OCI answered normally),
+    "429" (rate limited), "slow" (a real error: back off so it doesn't alert every few
+    seconds; the edge is untouched), "keep" (network blip / 5xx: says nothing about
+    our rate, pause unchanged)."""
+    p = board.pause
     if verdict == "ok":
-        board.pause = max(config.PAUSE_MIN_S, board.pause - PAUSE_FASTER_S)
+        board.prev_429 = False
+        if board.edge and p < board.edge:
+            board.below_edge += 1
+        if board.hold:
+            board.hold -= 1
+        else:
+            fast = (not board.edge or p > board.edge * PAUSE_NEAR_ZONE
+                    or board.below_edge >= PAUSE_EDGE_STALE)
+            p -= PAUSE_FAST_STEP_S if fast else PAUSE_NEAR_STEP_S
+    elif verdict == "429":
+        board.edge = p
+        p *= PAUSE_REPEAT_X if board.prev_429 else PAUSE_BACKOFF
+        board.hold = PAUSE_HOLD_TRIES
+        board.below_edge = 0
+        board.prev_429 = True
     elif verdict == "slow":
-        board.pause = min(config.PAUSE_MAX_S, board.pause * PAUSE_SLOWER_X)
+        p *= PAUSE_REPEAT_X
+    board.pause = min(config.PAUSE_MAX_S, max(config.PAUSE_MIN_S, p))
+    board.save()
     return int(board.pause) + random.randint(0, 5)
 
 
@@ -311,6 +337,13 @@ def run() -> None:
         _finish(board, "done", "🏁 all slots already filled")
         return
 
+    # A restart usually comes right after an attempt; going again at once got a 429
+    # on Zurich after every deploy. Wait the remembered pause first.
+    first_wait = int(board.pause)
+    board.next_try = _local_now() + datetime.timedelta(seconds=first_wait)
+    board.poke()
+    _stop_event.wait(first_wait)
+
     last_day = _local_now().date()
     transient_streak = 0
     ad_turn = 0  # one AD per attempt, round-robin: 1 call/attempt keeps us under the 429 limit
@@ -370,7 +403,7 @@ def run() -> None:
                 have = _have_slots(have)
                 board.have = set(have)
                 _announce_unnotified(have, notified)
-            delay = _next_delay(board, "keep" if _is_transient(e) and not rate_limited else "slow")
+            delay = _next_delay(board, "429" if rate_limited else "keep" if _is_transient(e) else "slow")
             if len(have) >= target:
                 board.attempt("won")
                 _finish(board, "done", "🏁 all slots filled")

@@ -71,9 +71,14 @@ class Board:
         self.total_since = s.get("total_since") or self.day
         # [[unix_ts, text, count], ...] newest last; entries without a count get 1
         self.journal = [list(j[:2]) + [j[2] if len(j) > 2 else 1] for j in s.get("journal", [])]
-        # current self-tuning pause (main._next_delay), kept across restarts
+        # self-tuning pause (main._next_delay), kept across restarts: current pause,
+        # edge = the pause that last got a 429, hold = clean answers left to wait there
         self.pause = float(s.get("pause") or config.PAUSE_START_S)
         self.pause = min(max(self.pause, config.PAUSE_MIN_S), config.PAUSE_MAX_S)
+        self.edge: float | None = s.get("edge")
+        self.hold = int(s.get("hold") or 0)
+        self.below_edge = 0   # clean answers in a row below the edge
+        self.prev_429 = False
 
     # ---- state -----------------------------------------------------------------
     @staticmethod
@@ -87,9 +92,14 @@ class Board:
             logger.warning("State file unreadable, starting fresh: %s", e)
             return {}
 
+    def save(self) -> None:
+        with self._lock:
+            self._save()
+
     def _save(self) -> None:
         state = {"msg_id": self.msg_id, "day": self.day, "today": self.today, "total": self.total,
-                 "total_since": self.total_since, "journal": self.journal, "pause": self.pause}
+                 "total_since": self.total_since, "journal": self.journal, "pause": self.pause,
+                 "edge": self.edge, "hold": self.hold}
         try:
             tmp = STATE_FILE + ".tmp"
             with open(tmp, "w") as f:

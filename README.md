@@ -4,7 +4,7 @@ Hunts for Oracle Cloud **Always Free ARM** capacity. It keeps trying to create a
 
 ## Features
 
-- **Polling with jitter**: self-tuning pause (starts at 60 s, −3 s after each normal answer, ×1.5 after each 429, bounded 30–300 s) so each account runs at its own OCI rate limit; ADs rotate one per attempt, silent retry on "Out of host capacity"
+- **Polling with jitter**: self-tuning pause that remembers where OCI last answered 429 and stays just above it (bounded 15–300 s), so each account runs at its own OCI rate limit; ADs rotate one per attempt, silent retry on "Out of host capacity"
 - **Multiple availability domains**: give a comma-separated list and attempts rotate through them, one AD per attempt
 - **Multiple instances**: `TARGET_INSTANCES=2` hunts `arm-instance` + `arm-instance-2` (e.g. two 1 OCPU / 6 GB boxes), resumes correctly after a restart
 - **Duplicate-safe**: never retries once a VM was created; re-checks existing instances after any error
