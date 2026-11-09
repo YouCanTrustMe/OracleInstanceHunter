@@ -104,6 +104,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ├── config.py               # Loads all config from .env
 ├── oci_client.py           # OCI API: launch instance, detect image, get public IP
 ├── notifier.py             # Telegram notifications (silent/loud)
+├── status_board.py         # Pinned live status message, /info text, daily summary
 ├── server_stats.py         # Server load snapshot (/info command)
 ├── watchdog.py             # Peer watchdog: alert if the other server stops responding
 ├── oracle-hunter.service   # systemd unit file
@@ -114,6 +115,8 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 │   ├── manage_servers.py   # List / reboot instances across accounts
 │   ├── create_e2_micro.py  # One-shot E2.1.Micro creation
 │   ├── test_launch.py      # Manual launch/terminate test (run on a hunter server)
+│   ├── interval_probe.py   # Measures the OCI 429 limit per launch interval
 │   └── accounts_config.py  # Loads gitignored accounts.json
+├── tests/                  # python -m unittest discover -s tests -t tests (Python 3.10+)
 └── secrets/                # Gitignored: OCI API keys (*.pem) + generated SSH keys
 ```
