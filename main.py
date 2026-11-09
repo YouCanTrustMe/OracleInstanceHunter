@@ -346,6 +346,7 @@ def run() -> None:
 
     last_day = _local_now().date()
     transient_streak = 0
+    streak_since = _local_now()  # when the current run of network/5xx failures began
     ad_turn = 0  # one AD per attempt, round-robin: 1 call/attempt keeps us under the 429 limit
 
     while not _stop_event.is_set() and len(have) < target:
@@ -383,7 +384,7 @@ def run() -> None:
             if is_service and is_out_of_capacity(e):
                 if transient_streak >= TRANSIENT_ALERT_AFTER:
                     notifier.send_message("Connection to OCI restored, hunting normally.", silent=True)
-                    board.event("🔌 connection to OCI restored")
+                    board.outage_over()
                 transient_streak = 0
                 delay = _next_delay(board, "ok")
                 logger.info("Out of capacity. Retrying in %d seconds... [%s]", delay, ad_label)
@@ -422,10 +423,14 @@ def run() -> None:
                     logger.warning("Rate limited: %s (pause now %d s)", short, board.pause)
                 else:
                     transient_streak += 1
+                    if transient_streak == 1:
+                        streak_since = _local_now()
                     logger.warning("Temporary error (%d in a row): %s", transient_streak, short if is_service else e)
-                board.event(f"⏳ {short}, retried")
+                # No journal line per blip: 429s and network blips are counted on the
+                # board; only a real outage (below) gets a journal line.
                 board.attempt("throttled" if rate_limited else "network", delay)
                 if not rate_limited and transient_streak == TRANSIENT_ALERT_AFTER:
+                    board.event(f"{status_board.OUTAGE_PREFIX}{streak_since:%H:%M}")
                     notifier.send_message(
                         f"Can't reach OCI for {transient_streak} attempts in a row (still retrying):\n"
                         f"<code>{notifier.esc(e)}</code>")

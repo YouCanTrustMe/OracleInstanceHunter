@@ -80,10 +80,10 @@ def disk(path: str = "/") -> dict:
 
 def uptime_str() -> str:
     """Return human-readable uptime string."""
-    seconds = float(_read_proc("/proc/uptime").split()[0])
-    h, rem = divmod(int(seconds), 3600)
-    m = rem // 60
-    return f"{h}h {m:02d}m"
+    seconds = int(float(_read_proc("/proc/uptime").split()[0]))
+    d, rem = divmod(seconds, 86400)
+    h, rem = divmod(rem, 3600)
+    return f"{d}d {h}h" if d else f"{h}h {rem // 60}m"
 
 
 def format_report() -> str:

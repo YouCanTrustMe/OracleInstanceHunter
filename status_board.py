@@ -1,8 +1,11 @@
 """status_board.py — one pinned Telegram message, edited in place after every attempt.
 
-Replaces the hourly "Still hunting..." messages: the chat stays quiet, the pinned
-message always shows the live picture (today / total / last try / server / journal).
-Counters live in hunter_state.json so a restart doesn't lose them.
+The chat stays quiet; the pinned message shows only what matters right now (next
+try, today's counts, 429s, problems, journal). Totals, settings and server details
+live in /info. Counters live in hunter_state.json so a restart doesn't lose them.
+Times are <tg-time> entities: Telegram shows them relative ("in 2 minutes") in the
+viewer's own time zone and keeps them ticking; the HH:MM fallback is what a copy,
+a notification or an old client shows.
 """
 
 import datetime
@@ -19,9 +22,12 @@ import server_stats
 logger = logging.getLogger(__name__)
 
 STATE_FILE = "hunter_state.json"
-JOURNAL_SIZE = 6
+JOURNAL_SIZE = 8  # newest first, in a collapsed quote
 TZ = config.TZ  # same as the log; DST switches by itself
 REFUSALS_BEFORE_RESEND = 3  # Telegram refusing edits this many times in a row → send a new board
+RESTART_MERGE_S = 300  # "stopped" then "started" within this → one "restarted" line
+OUTAGE_PREFIX = "📡 OCI unreachable since "
+HIGH_PCT = 90  # RAM/disk at or above this (or swap half full) → server line on the board
 
 
 def _now() -> datetime.datetime:
@@ -32,21 +38,54 @@ def _num(n: int) -> str:
     return f"{n:,}".replace(",", " ")
 
 
+def tg_time(when: datetime.datetime, fmt: str = "r") -> str:
+    """Telegram date/time entity (Bot API 9.5). fmt "r" = relative, "t" = HH:MM,
+    "dt" = date + time. The fallback text must never be empty: an empty entity shows
+    nothing at all."""
+    fallback = f"{when:%d.%m %H:%M}" if fmt == "dt" else f"{when:%H:%M}"
+    return f'<tg-time unix="{int(when.timestamp())}" format="{fmt}">{fallback}</tg-time>'
+
+
+def _pct(part: int, whole: int) -> str:
+    return f"{100 * part / whole:.0f}%" if whole else "0%"
+
+
+def _problems(t: dict) -> str:
+    """'Errors 1 · network 2' — empty when the day is clean."""
+    parts = []
+    if t["errors"]:
+        parts.append(f"errors <b>{_num(t['errors'])}</b>")
+    if t["network"]:
+        parts.append(f"network <b>{_num(t['network'])}</b>")
+    text = " · ".join(parts)
+    return text[:1].upper() + text[1:]
+
+
+def _size(mb: int) -> str:
+    return f"{mb / 1024:.1f} GB" if mb >= 1024 else f"{mb} MB"
+
+
+def _server_alert() -> str:
+    """Server line, only when something is nearly full (Zurich once hung on RAM)."""
+    try:
+        mem = server_stats.memory()
+        dsk = server_stats.disk("/")
+    except Exception:
+        return ""
+    swap_high = mem["swap_total_mb"] and mem["swap_used_mb"] >= mem["swap_total_mb"] / 2
+    if mem["percent"] < HIGH_PCT and dsk["percent"] < HIGH_PCT and not swap_high:
+        return ""
+    bold = lambda text, high: f"<b>{text}</b>" if high else text
+    parts = [bold(f"RAM {mem['percent']:.0f}%", mem["percent"] >= HIGH_PCT)]
+    if mem["swap_total_mb"]:
+        parts.append(bold(f"swap {_size(mem['swap_used_mb'])}", swap_high))
+    parts.append(bold(f"disk {dsk['percent']:.0f}%", dsk["percent"] >= HIGH_PCT))
+    return "🖥 " + " · ".join(parts)
+
+
 def _zero_day() -> dict:
     # throttled = OCI 429 only; network = connection blips and OCI 5xx
     return {"tries": 0, "capacity": 0, "throttled": 0, "network": 0, "errors": 0}
-
-
-def _breakdown(t: dict, summary: bool = False) -> str:
-    """'303 no capacity · 9 throttled · 0 errors' — one wording for the board and the day summary."""
-    parts = [f"{_num(t['capacity'])} no capacity"]
-    if t["throttled"]:
-        parts.append(f"{_num(t['throttled'])} throttled" + (" (429)" if summary else ""))
-    if t["network"]:
-        parts.append(f"{_num(t['network'])} network")
-    if t["errors"] or not summary:
-        parts.append(f"{_num(t['errors'])} error{'' if t['errors'] == 1 else 's'}")
-    return " · ".join(parts)
 
 
 class Board:
@@ -55,7 +94,6 @@ class Board:
         self.ads_label = ads_label
         self.have: set = set()
         self.phase = "hunting"  # hunting | done | stopped
-        self.last_try: datetime.datetime | None = None
         self.next_try: datetime.datetime | None = None
         self._lock = threading.Lock()       # state (counters, journal, file)
         self._tg_lock = threading.Lock()    # one Telegram refresh at a time
@@ -70,7 +108,10 @@ class Board:
         self.total = s.get("total", 0)
         self.total_since = s.get("total_since") or self.day
         # [[unix_ts, text, count], ...] newest last; entries without a count get 1
-        self.journal = [list(j[:2]) + [j[2] if len(j) > 2 else 1] for j in s.get("journal", [])]
+        # (429 lines from older versions are dropped: 429s have their own line now)
+        self.journal = [list(j[:2]) + [j[2] if len(j) > 2 else 1] for j in s.get("journal", [])
+                        if not str(j[1]).startswith("⏳")]
+        self.last_429: float | None = s.get("last_429")  # unix time of the last 429
         # self-tuning pause (main._next_delay), kept across restarts: current pause,
         # edge = the pause that last got a 429, hold = clean answers left to wait there
         self.pause = float(s.get("pause") or config.PAUSE_START_S)
@@ -99,7 +140,7 @@ class Board:
     def _save(self) -> None:
         state = {"msg_id": self.msg_id, "day": self.day, "today": self.today, "total": self.total,
                  "total_since": self.total_since, "journal": self.journal, "pause": self.pause,
-                 "edge": self.edge, "hold": self.hold}
+                 "edge": self.edge, "hold": self.hold, "last_429": self.last_429}
         try:
             tmp = STATE_FILE + ".tmp"
             with open(tmp, "w") as f:
@@ -112,15 +153,30 @@ class Board:
     def event(self, text: str) -> None:
         """Add a line to the journal shown at the bottom of the pinned message."""
         with self._lock:
-            # Same event again (e.g. a 429 every hour): bump its counter instead of
-            # pushing everything else out of the journal.
+            now = time.time()
             last = self.journal[-1] if self.journal else None
+            if (text == "▶️ started" and last and last[1] == "⏹ stopped"
+                    and now - last[0] < RESTART_MERGE_S):
+                text = "🔄 restarted"  # a deploy: one line instead of two
+                self.journal.pop()
+                last = self.journal[-1] if self.journal else None
+            # Same event again: bump its counter instead of pushing everything
+            # else out of the journal.
             if last and last[1] == text:
-                last[0] = time.time()
+                last[0] = now
                 last[2] += 1
             else:
-                self.journal = (self.journal + [[time.time(), text, 1]])[-JOURNAL_SIZE:]
+                self.journal = (self.journal + [[now, text, 1]])[-JOURNAL_SIZE:]
             self._save()
+
+    def outage_over(self) -> None:
+        """Turn the open "OCI unreachable since 09:31" line into "09:31–09:40"."""
+        with self._lock:
+            for entry in reversed(self.journal):
+                if entry[1].startswith(OUTAGE_PREFIX):
+                    entry[1] = f"📡 OCI unreachable {entry[1][len(OUTAGE_PREFIX):]}–{_now():%H:%M}"
+                    self._save()
+                    break
 
     def attempt(self, outcome: str, delay: int | None = None) -> None:
         """Count one attempt. outcome: capacity | throttled | network | errors | won."""
@@ -130,8 +186,9 @@ class Board:
             if outcome in self.today:
                 self.today[outcome] += 1
             self.total += 1
-            self.last_try = _now()
-            self.next_try = self.last_try + datetime.timedelta(seconds=delay) if delay else None
+            if outcome == "throttled":
+                self.last_429 = time.time()
+            self.next_try = _now() + datetime.timedelta(seconds=delay) if delay else None
             self._save()
         self.poke()
 
@@ -166,13 +223,14 @@ class Board:
         if not t["tries"]:
             return
         d = datetime.date.fromisoformat(day).strftime("%d.%m")
-        verdict = "⚠️ there were errors — see /logs" if t["errors"] else "✅ no errors"
-        notifier.send_message(
-            f"📊 <b>Day {d}</b> · {config.OCI_REGION}\n"
-            f"{_num(t['tries'])} tries: {_breakdown(t, summary=True)}\n"
-            f"{verdict}\n"
-            f"<tg-spoiler>Σ {_num(self.total)} tries since {self._since()}</tg-spoiler>",
-            silent=True)
+        lines = [f"📊 <b>Day {d}</b> · <b>{_num(t['tries'])}</b> tries"]
+        if t["throttled"]:
+            lines.append(f"🚦 Throttled (429) <b>{_num(t['throttled'])}</b> · {_pct(t['throttled'], t['tries'])}")
+        problems = _problems(t)
+        lines.append(f"⚠️ {problems} · see /log" if problems else "✅ No errors")
+        if self.edge:
+            lines.append(f"🎚 OCI limit ≈ {self.edge:.0f} s")
+        notifier.send_message("\n".join(lines), silent=True)
 
     # ---- rendering -------------------------------------------------------------
     def _since(self) -> str:
@@ -182,56 +240,36 @@ class Board:
         now = _now()
         target = len(self.slots)
         won = len(self.have & set(self.slots))
-        size = f"{config.OCPUS:g} OCPU · {config.MEMORY_GB:g} GB"
-        head = {"hunting": f"🟡 Hunting <b>{won}/{target}</b>",
-                "done": f"🟢 Done <b>{won}/{target}</b>",
-                "stopped": f"⚪️ Stopped <b>{won}/{target}</b>"}[self.phase]
-        slots = "  ".join(("✅ " if n in self.have else "⬜️ ") + n for n in self.slots)
-
+        head = {"hunting": "🟡 <b>Hunting</b>", "done": "🟢 <b>Done</b>",
+                "stopped": "⚪️ <b>Stopped</b>"}[self.phase]
+        boxes = "".join("✅" if n in self.have else "⬜️" for n in self.slots)
         t = self.today
 
-        lines = [
-            f"🎯 <b>OCI ARM Hunter</b> · {config.OCI_REGION}",
-            f"{head} · {size}",
-            slots,
-            "",
-            f"📅 Today <b>{_num(t['tries'])}</b> tries",
-            f"      {_breakdown(t)}",
-        ]
-        if self.phase == "hunting" and self.last_try:
-            nxt = f" · next ≈ {self.next_try:%H:%M}" if self.next_try else ""
-            lines.append(f"⏱ Last {self.last_try:%H:%M}{nxt} · {self.ads_label}")
-        if self.phase == "hunting":
-            share = f" · 429 today {100 * t['throttled'] / t['tries']:.0f}%" if t["tries"] else ""
-            lines.append(f"🎚 Pause {self.pause:.0f} s (auto){share}")
-
-        try:
-            mem = server_stats.memory()
-            dsk = server_stats.disk("/")
-            srv = f"🖥 RAM {mem['percent']:.0f}%"
-            if mem["swap_total_mb"]:
-                srv += f" · swap {mem['swap_used_mb']} MB"
-            srv += f" · disk {dsk['percent']:.0f}% · up {server_stats.uptime_str()}"
-            lines.append(srv)
-        except Exception:
-            pass
+        lines = [f"{head} · {boxes} <b>{won}/{target}</b>", ""]
+        if self.phase == "hunting" and self.next_try:
+            # "3 minutes ago" here while hunting = the hunter is stuck
+            lines.append(f"⏭ Next {tg_time(self.next_try)} · {self.ads_label} · pause <b>{self.pause:.0f} s</b>")
+        lines.append(f"📊 Today <b>{_num(t['tries'])}</b> tries")
+        if t["throttled"]:
+            last = ""
+            if self.last_429:
+                last = f" · last {tg_time(datetime.datetime.fromtimestamp(self.last_429, TZ))}"
+            lines.append(f"🚦 Throttled (429) <b>{_num(t['throttled'])}</b> · {_pct(t['throttled'], t['tries'])}{last}")
+        problems = _problems(t)
+        if problems:
+            lines.append(f"⚠️ {problems}")
+        server = _server_alert()
+        if server:
+            lines.append(server)
 
         if self.journal:
-            lines += ["", "📝 <b>Journal</b>"]
-            for ts, text, count in self.journal:
+            rows = []
+            for ts, text, count in reversed(self.journal):
                 when = datetime.datetime.fromtimestamp(ts, TZ)
-                stamp = f"{when:%H:%M}" if when.date() == now.date() else f"{when:%d.%m %H:%M}"
                 times = f" ×{count}" if count > 1 else ""
-                lines.append(f"<code>{stamp}</code> {text}{times}")
-        hidden = [f"Σ Total {_num(self.total)} tries since {self._since()}"]
-        if config.HUNT_SINCE:
-            try:
-                since = datetime.date.fromisoformat(config.HUNT_SINCE)
-                hidden.append(f"🗓 Hunting {(now.date() - since).days} days (since {since:%d.%m.%Y})")
-            except ValueError:
-                pass
-        lines += ["", f"<tg-spoiler>{chr(10).join(hidden)}</tg-spoiler>",
-                  f"<i>updated {now:%H:%M:%S} ({now:%Z})</i>"]
+                rows.append(f"{tg_time(when, 't' if when.date() == now.date() else 'dt')} {notifier.esc(text)}{times}")
+            lines += ["", "📝 <b>Journal</b>", "<blockquote expandable>" + "\n".join(rows) + "</blockquote>"]
+        lines.append(f"<i>updated {tg_time(now)}</i>")
         return "\n".join(lines)
 
     # ---- telegram --------------------------------------------------------------
